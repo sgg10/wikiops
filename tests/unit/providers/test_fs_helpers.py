@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import pickle
 import subprocess
 import sys
 from pathlib import Path
@@ -116,6 +117,39 @@ def test_with_namespace_can_replace_an_existing_namespace() -> None:
     first = FsError("io.error", "Failed", namespace="a")
 
     assert str(first.with_namespace("b")) == "[b:io.error] Failed."
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        FsError(
+            "path.symlink_escape",
+            "Escapes root",
+            path="docs/a.md",
+            root=Path("/r"),
+            hint="remove the link",
+            namespace="local_files",
+        ),
+        FsError("path.traversal", "Escapes root"),
+    ],
+    ids=["namespaced", "un-namespaced"],
+)
+def test_fs_error_survives_a_pickle_round_trip(error: FsError) -> None:
+    restored = pickle.loads(pickle.dumps(error))
+
+    assert isinstance(restored, FsError)
+    assert restored is not error
+    assert (restored.code, restored.summary, restored.path) == (
+        error.code,
+        error.summary,
+        error.path,
+    )
+    assert (restored.root, restored.hint, restored.namespace) == (
+        error.root,
+        error.hint,
+        error.namespace,
+    )
+    assert str(restored) == str(error)
 
 
 def test_fs_error_is_a_configuration_error() -> None:
@@ -603,3 +637,58 @@ def test_dangling_in_root_symlink_is_not_mistaken_for_a_loop(
         pytest.skip("symlinks cannot be created here")
 
     assert _fs.ensure_within_root(root, link) == link
+
+
+# ---------------------------------------------------------------------------
+# Ancestor probe terminates when no ancestor exists (e.g. Windows drive/UNC root)
+# ---------------------------------------------------------------------------
+
+_PROBE_LIMIT = 500
+
+
+@pytest.fixture
+def nothing_exists(monkeypatch: pytest.MonkeyPatch):
+    """Make ``os.path.lexists`` report False for every path, bounded.
+
+    Emulates an anchor (drive or UNC share root) that does not exist: the
+    ancestor probe reaches a path whose parent is itself. A regression fails
+    with ``AssertionError`` after ``_PROBE_LIMIT`` calls instead of hanging.
+    """
+    calls = {"count": 0}
+
+    def lexists(_path: object) -> bool:
+        calls["count"] += 1
+        assert calls["count"] <= _PROBE_LIMIT, "ancestor probe did not terminate"
+        return False
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(os.path, "lexists", lexists)
+        yield calls
+
+
+def test_ensure_within_root_reports_unresolvable_when_no_ancestor_exists(
+    root: Path, nothing_exists: dict[str, int]
+) -> None:
+    with pytest.raises(FsError) as excinfo:
+        _fs.ensure_within_root(root, root / "docs" / "a.md")
+
+    error = excinfo.value
+    assert error.code == "path.unresolvable"
+    assert error.path == "docs/a.md"
+    assert "Hint: " in str(error)
+    assert isinstance(error.__cause__, OSError)
+    assert 0 < nothing_exists["count"] <= _PROBE_LIMIT
+
+
+def test_resolve_root_reports_missing_root_when_no_ancestor_exists(
+    tmp_path: Path, nothing_exists: dict[str, int]
+) -> None:
+    with pytest.raises(FsError) as excinfo:
+        _fs.resolve_root("wiki", cwd=tmp_path)
+
+    error = excinfo.value
+    assert error.code == "settings.root_missing"
+    assert "configured='wiki'" in str(error)
+    assert f"cwd='{tmp_path}'" in str(error)
+    assert "Hint: " in str(error)
+    assert 0 < nothing_exists["count"] <= _PROBE_LIMIT

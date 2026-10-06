@@ -69,6 +69,14 @@ class FsError(ConfigurationError):
             parts.append(f"Hint: {self.hint.rstrip('.')}.")
         return " ".join(parts)
 
+    def __reduce__(self) -> tuple[Callable[..., FsError], tuple[object, ...]]:
+        # Exceptions pickle through ``cls(*self.args)``, which cannot rebuild
+        # this keyword-only signature; rebuild from the structured fields.
+        return (
+            _rebuild_fs_error,
+            (self.code, self.summary, self.path, self.root, self.hint, self.namespace),
+        )
+
     def with_namespace(self, namespace: str) -> FsError:
         """Return a copy of this error carrying ``namespace``; ``self`` is unchanged."""
         return FsError(
@@ -79,6 +87,17 @@ class FsError(ConfigurationError):
             hint=self.hint,
             namespace=namespace,
         )
+
+
+def _rebuild_fs_error(
+    code: str,
+    summary: str,
+    path: str | None,
+    root: Path | None,
+    hint: str | None,
+    namespace: str | None,
+) -> FsError:
+    return FsError(code, summary, path=path, root=root, hint=hint, namespace=namespace)
 
 
 # ---------------------------------------------------------------------------
@@ -184,11 +203,17 @@ def _resolve_real(path: Path) -> Path:
     Raises ``RuntimeError``/``OSError`` for symlink loops on every supported
     interpreter: before Python 3.13 ``Path.resolve`` raises on loops itself,
     afterwards it silently returns the unresolved tail, so the nearest existing
-    ancestor is probed explicitly.
+    ancestor is probed explicitly. The probe stops at the filesystem anchor: a
+    nonexistent drive or unreachable UNC share root is its own parent, so
+    ``FileNotFoundError`` is raised instead of looping forever.
     """
     real = path.resolve(strict=False)
     probe = real
     while not os.path.lexists(probe):
+        if probe.parent == probe:
+            raise FileNotFoundError(
+                errno.ENOENT, "No existing ancestor directory", str(real)
+            )
         probe = probe.parent
     try:
         os.stat(probe)
@@ -211,16 +236,22 @@ def resolve_root(raw: str, *, cwd: Path | None = None) -> Path:
             "Root directory is not configured (empty value)",
             hint="set 'root' to an existing directory",
         )
+    base = cwd if cwd is not None else Path.cwd()
+    context = f"configured='{raw}', cwd='{base}'"
     try:
-        base = cwd if cwd is not None else Path.cwd()
         resolved = _resolve_real(base / Path(raw.strip()).expanduser())
+    except FileNotFoundError as exc:
+        raise FsError(
+            "settings.root_missing",
+            f"Root directory does not exist ({context})",
+            hint="create the directory or correct 'root'",
+        ) from exc
     except (OSError, RuntimeError) as exc:
         raise FsError(
             "path.unresolvable",
             f"Root directory could not be resolved (configured='{raw}')",
             hint="fix the symlink loop or unreadable directory in 'root'",
         ) from exc
-    context = f"configured='{raw}', cwd='{base}'"
     if not resolved.exists():
         raise FsError(
             "settings.root_missing",
