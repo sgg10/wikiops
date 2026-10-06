@@ -8,11 +8,19 @@ that belong to the ``local_files`` provider itself.
 from __future__ import annotations
 
 import posixpath
+import re
 
 from wikiops.providers._fs import FsError
 
 _MARKDOWN_SUFFIX = ".md"
 _FOREIGN_MARKDOWN_SUFFIXES = frozenset({".markdown", ".mdx", ".txt"})
+_INDEX_STEMS = frozenset({"readme", "index"})
+_TITLE_FORBIDDEN_CHARS = frozenset('/\\:*?"<>|')
+_WHITESPACE_RUN = re.compile(r"\s+")
+_TITLE_HINT = (
+    "use a plain title without '/', '\\', control characters or : * ? \" < > |, "
+    "that does not start with '.'; or set an explicit ref on the operation"
+)
 
 
 def _suggest_markdown_name(relative: str) -> str:
@@ -42,3 +50,63 @@ def require_markdown_path(relative: str) -> str:
         path=relative,
         hint=f"use '{_suggest_markdown_name(relative)}' instead",
     )
+
+
+def _title_error(title: str, reason: str) -> FsError:
+    return FsError(
+        "title.invalid",
+        f"Title {title!r} cannot be used as a file name ({reason})",
+        hint=_TITLE_HINT,
+    )
+
+
+def _title_problem(title: str) -> str | None:
+    """Return why ``title`` is unusable as a file name, or ``None`` when it is fine."""
+    if not title:
+        return "it is empty"
+    if title in (".", ".."):
+        return f"'{title}' is a reserved name"
+    if title.startswith("."):
+        return "it starts with '.'"
+    if any(ord(char) < 32 or ord(char) == 127 for char in title):
+        return "it contains a control character"
+    forbidden = sorted(_TITLE_FORBIDDEN_CHARS.intersection(title))
+    if forbidden:
+        return f"it contains the character '{forbidden[0]}'"
+    return None
+
+
+def filename_for_title(title: str) -> str:
+    """Return the file name derived from ``title`` (D7).
+
+    The title is trimmed, every whitespace run becomes a single ``-``, case and
+    Unicode are preserved and ``.md`` is appended unless the result already ends
+    in ``.md`` (case-insensitive). Unusable titles raise an un-namespaced
+    ``FsError("title.invalid")``.
+    """
+    trimmed = title.strip()
+    problem = _title_problem(trimmed)
+    if problem is not None:
+        raise _title_error(title, problem)
+    name = _WHITESPACE_RUN.sub("-", trimmed)
+    if name.lower().endswith(_MARKDOWN_SUFFIX):
+        return name
+    return f"{name}{_MARKDOWN_SUFFIX}"
+
+
+def default_document_path(*, title: str, parent_path: str | None) -> str:
+    """Return the root-relative path for a document whose ``ref`` was omitted.
+
+    Fallback only: an explicit ``ref`` always wins and is written verbatim.
+    Without a parent the file sits at the root. A ``README.md`` / ``index.md``
+    parent (case-insensitive) yields a sibling; any other parent yields
+    ``<parent-dir>/<parent-stem>/<file>``. Pure function, no filesystem access.
+    """
+    filename = filename_for_title(title)
+    if parent_path is None:
+        return filename
+    parent_dir, parent_name = posixpath.split(parent_path)
+    parent_stem = posixpath.splitext(parent_name)[0]
+    if parent_stem.lower() in _INDEX_STEMS:
+        return posixpath.join(parent_dir, filename)
+    return posixpath.join(parent_dir, parent_stem, filename)

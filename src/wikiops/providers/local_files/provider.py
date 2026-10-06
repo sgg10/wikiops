@@ -17,26 +17,36 @@ from pydantic import ConfigDict, Field
 
 from wikiops.providers import _fs
 from wikiops.providers._fs import FsError
-from wikiops.providers.local_files._layout import require_markdown_path
+from wikiops.providers.local_files._layout import (
+    default_document_path,
+    require_markdown_path,
+)
 from wikiops_sdk.contracts import ProviderSettings
 from wikiops_sdk.domain import (
+    AppliedOperationResult,
     Asset,
     AssetRef,
     ApplyResult,
     ChangeSet,
+    CreateChildDocumentOperation,
+    CreateDocumentOperation,
     Document,
     DocumentRef,
     DocumentVersion,
     ExecutionContext,
+    OperationStatus,
     ProviderCapability,
     PutAssetOperation,
     RefKind,
+    UpdateDocumentOperation,
 )
 
 ERROR_NAMESPACE = "local_files"
 
 _PATH_REFS_HINT = "set locator.path to a root-relative POSIX path such as 'docs/a.md'"
 _WRITE_SIDE_PENDING = "local_files write operations are not implemented yet"
+_CreateOperation = CreateDocumentOperation | CreateChildDocumentOperation
+_TOKEN_PREFIX = len("sha256:") + 12
 
 
 class LocalFilesProviderSettings(ProviderSettings):
@@ -147,7 +157,8 @@ class LocalFilesProvider:
     def get_document(self, ref: DocumentRef) -> Document:
         relative, real = self._locate(ref)
         root_real = self._ensure_resolved()
-        if not real.exists():
+        data = self._read_existing(relative, real)
+        if data is None:
             raise _error(
                 "document.not_found",
                 f"Document does not exist (absolute='{real}', cwd='{self._cwd}')",
@@ -155,24 +166,6 @@ class LocalFilesProvider:
                 root=root_real,
                 hint="create the document first or remove the ref from the plugin's required refs",
             )
-        if not real.is_file():
-            raise _error(
-                "path.not_a_file",
-                "Document path is not a regular file",
-                path=relative,
-                root=root_real,
-                hint="point the ref at a Markdown file, not a directory",
-            )
-        try:
-            data = real.read_bytes()
-        except OSError as exc:
-            raise _error(
-                "io.error",
-                f"Could not read the document ({type(exc).__name__}: {exc})",
-                path=relative,
-                root=root_real,
-                hint="check the permissions of the file",
-            ) from exc
         with _namespaced():
             content = _fs.decode_text(data, path=relative)
         version = _fs.content_version(data)
@@ -188,6 +181,30 @@ class LocalFilesProvider:
             },
         )
 
+    def _read_existing(self, relative: str, real: Path) -> bytes | None:
+        """Return the bytes of the file at ``real``, or ``None`` when it is missing."""
+        root_real = self._ensure_resolved()
+        if not real.exists():
+            return None
+        if not real.is_file():
+            raise _error(
+                "path.not_a_file",
+                "Document path is not a regular file",
+                path=relative,
+                root=root_real,
+                hint="point the ref at a Markdown file, not a directory",
+            )
+        try:
+            return real.read_bytes()
+        except OSError as exc:
+            raise _error(
+                "io.error",
+                f"Could not read the document ({type(exc).__name__}: {exc})",
+                path=relative,
+                root=root_real,
+                hint="check the permissions of the file",
+            ) from exc
+
     def build_link(self, ref: DocumentRef) -> Optional[str]:
         _, real = self._locate(ref)
         return real.as_uri()
@@ -199,7 +216,11 @@ class LocalFilesProvider:
         raise NotImplementedError(_WRITE_SIDE_PENDING)
 
     def apply_changes(self, changeset: ChangeSet) -> ApplyResult:
-        raise NotImplementedError(_WRITE_SIDE_PENDING)
+        """Apply operations one by one; a failure never stops the later operations."""
+        return ApplyResult(
+            provider_name=self.settings.provider_name,
+            results=[self._apply_operation(op) for op in changeset.operations],
+        )
 
     # -- Host hook ---------------------------------------------------------
 
@@ -213,6 +234,207 @@ class LocalFilesProvider:
         parts.append(f"cwd='{self._cwd}'")
         parts.append(f"assets_dir='{self._assets_real}'")
         return " ".join(parts)
+
+    # -- apply_changes -----------------------------------------------------
+
+    def _apply_operation(self, operation: Any) -> AppliedOperationResult:
+        """Apply one operation; every error becomes a FAILED result, never a raise."""
+        ref: DocumentRef | None = None
+        try:
+            if isinstance(operation, (CreateDocumentOperation, CreateChildDocumentOperation)):
+                ref = self._target_for(operation)
+                return self._apply_create(operation, ref)
+            if isinstance(operation, UpdateDocumentOperation):
+                ref = operation.ref
+                return self._apply_update(operation)
+            return self._unsupported(operation)
+        except FsError as exc:
+            namespaced = exc if exc.namespace else exc.with_namespace(ERROR_NAMESPACE)
+            return self._result(
+                operation, OperationStatus.FAILED, str(namespaced), ref=ref
+            )
+        except Exception as exc:  # noqa: BLE001 - one operation must never abort the batch
+            unexpected = _error(
+                "io.error",
+                f"Unexpected error while applying the operation ({type(exc).__name__}: {exc})",
+                path=self._relative_of(ref),
+                root=self._root_real,
+                hint="check the permissions and state of the target, then re-run",
+            )
+            return self._result(
+                operation, OperationStatus.FAILED, str(unexpected), ref=ref
+            )
+
+    def _unsupported(self, operation: Any) -> AppliedOperationResult:
+        message = _error(
+            "op.unsupported",
+            f"Unsupported operation type: {type(operation).__name__}",
+            hint="local_files applies create_document, create_child_document and update_document",
+        )
+        return self._result(operation, OperationStatus.SKIPPED, str(message))
+
+    @staticmethod
+    def _relative_of(ref: DocumentRef | None) -> str | None:
+        """Return the locator path of ``ref`` for error context, when it has one."""
+        path = None if ref is None else ref.locator.get("path")
+        return path if isinstance(path, str) else None
+
+    def _result(
+        self,
+        operation: Any,
+        status: OperationStatus,
+        message: str,
+        *,
+        ref: DocumentRef | None = None,
+        data: bytes | None = None,
+    ) -> AppliedOperationResult:
+        version = None
+        if data is not None:
+            token = _fs.content_version(data)
+            version = DocumentVersion(token=token, etag=token)
+        return AppliedOperationResult(
+            operation_id=operation.operation_id,
+            status=status,
+            message=message,
+            resolved_ref=ref,
+            resulting_version=version,
+        )
+
+    def _target_for(self, operation: _CreateOperation) -> DocumentRef:
+        """Return the target of a create: an explicit ``ref`` wins, else derive it.
+
+        An explicit ``ref`` is used verbatim and ``parent_ref`` / the title are
+        ignored. Derivation from the title and the optional parent is only the
+        fallback for operations that carry no ``ref``.
+        """
+        if operation.ref is not None:
+            return operation.ref
+        parent_path = None
+        if operation.parent_ref is not None:
+            parent_path, _ = self._locate(operation.parent_ref)
+        title = (
+            operation.child_title
+            if isinstance(operation, CreateChildDocumentOperation)
+            else operation.title
+        )
+        with _namespaced():
+            path = default_document_path(title=title, parent_path=parent_path)
+        return DocumentRef(
+            provider=self.settings.provider_name,
+            kind=RefKind.PATH,
+            locator={"path": path},
+        )
+
+    def _apply_create(
+        self, operation: _CreateOperation, ref: DocumentRef
+    ) -> AppliedOperationResult:
+        content = (
+            operation.child_content
+            if isinstance(operation, CreateChildDocumentOperation)
+            else operation.content
+        )
+        data = content.encode("utf-8")
+        relative, real = self._locate(ref)
+        root_real = self._ensure_resolved()
+        existing = self._read_existing(relative, real)
+        if existing is None:
+            self._write(real, data, root_real)
+            return self._result(
+                operation,
+                OperationStatus.APPLIED,
+                f"Document created at '{real}'",
+                ref=ref,
+                data=data,
+            )
+        if existing == data:
+            return self._unchanged(operation, ref, relative, root_real, data)
+        if not self.settings.overwrite_existing:
+            raise _error(
+                "conflict.exists",
+                "Document already exists with different content",
+                path=relative,
+                root=root_real,
+                hint=(
+                    "use update_document, or set 'overwrite_existing: true' on "
+                    f"provider '{self.settings.provider_name}'"
+                ),
+            )
+        self._write(real, data, root_real)
+        overwritten = _error(
+            "applied.overwritten",
+            f"Existing document overwritten at '{real}'",
+            path=relative,
+            root=root_real,
+        )
+        return self._result(
+            operation, OperationStatus.APPLIED, str(overwritten), ref=ref, data=data
+        )
+
+    def _apply_update(self, operation: UpdateDocumentOperation) -> AppliedOperationResult:
+        """Update in order: validate, missing, identical, version, write."""
+        relative, real = self._locate(operation.ref)
+        root_real = self._ensure_resolved()
+        data = operation.new_content.encode("utf-8")
+        existing = self._read_existing(relative, real)
+        if existing is None:
+            raise _error(
+                "document.not_found",
+                "Document does not exist, so it cannot be updated",
+                path=relative,
+                root=root_real,
+                hint="use create_document to create it first",
+            )
+        if existing == data:
+            return self._unchanged(operation, operation.ref, relative, root_real, data)
+        expected = self._expected_token(operation.expected_version)
+        current = _fs.content_version(existing)
+        if expected is not None and expected != current:
+            raise _error(
+                "conflict.version_mismatch",
+                "Document changed since it was planned "
+                f"(expected '{expected[:_TOKEN_PREFIX]}', current '{current[:_TOKEN_PREFIX]}')",
+                path=relative,
+                root=root_real,
+                hint="re-run the plan to refresh the expected version, then apply again",
+            )
+        self._write(real, data, root_real)
+        return self._result(
+            operation,
+            OperationStatus.APPLIED,
+            f"Document updated at '{real}'",
+            ref=operation.ref,
+            data=data,
+        )
+
+    @staticmethod
+    def _expected_token(version: DocumentVersion | None) -> str | None:
+        """Return the version the plugin expects: the token, else the etag, else none."""
+        if version is None:
+            return None
+        return version.token or version.etag or None
+
+    def _unchanged(
+        self,
+        operation: Any,
+        ref: DocumentRef,
+        relative: str,
+        root_real: Path,
+        data: bytes,
+    ) -> AppliedOperationResult:
+        message = _error(
+            "noop.unchanged",
+            "Document already has this content; nothing was written",
+            path=relative,
+            root=root_real,
+        )
+        return self._result(
+            operation, OperationStatus.SKIPPED, str(message), ref=ref, data=data
+        )
+
+    @staticmethod
+    def _write(real: Path, data: bytes, root_real: Path) -> None:
+        with _namespaced():
+            _fs.atomic_write_bytes(real, data, root_real=root_real)
 
     # -- Path resolution ---------------------------------------------------
 
