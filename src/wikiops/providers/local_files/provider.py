@@ -1,0 +1,260 @@
+"""``local_files`` provider: Markdown documents under a configured root directory.
+
+Read side: settings, ref resolution, existence checks, document reads, links and
+the host ``describe_target`` hook. Every filesystem decision goes through the
+provider-agnostic ``wikiops.providers._fs`` helpers, whose un-namespaced
+``FsError`` instances are namespaced here, at the provider boundary.
+"""
+
+from __future__ import annotations
+
+import contextlib
+from collections.abc import Iterator
+from pathlib import Path, PurePosixPath
+from typing import Any, Dict, Optional
+
+from pydantic import ConfigDict, Field
+
+from wikiops.providers import _fs
+from wikiops.providers._fs import FsError
+from wikiops.providers.local_files._layout import require_markdown_path
+from wikiops_sdk.contracts import ProviderSettings
+from wikiops_sdk.domain import (
+    Asset,
+    AssetRef,
+    ApplyResult,
+    ChangeSet,
+    Document,
+    DocumentRef,
+    DocumentVersion,
+    ExecutionContext,
+    ProviderCapability,
+    PutAssetOperation,
+    RefKind,
+)
+
+ERROR_NAMESPACE = "local_files"
+
+_PATH_REFS_HINT = "set locator.path to a root-relative POSIX path such as 'docs/a.md'"
+_WRITE_SIDE_PENDING = "local_files write operations are not implemented yet"
+
+
+class LocalFilesProviderSettings(ProviderSettings):
+    """Settings for the ``local_files`` provider; unknown keys are rejected."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    root: str = Field(
+        ...,
+        min_length=1,
+        description="Root directory; relative values resolve against the working directory and '~' is expanded.",
+    )
+    assets_dir: str = Field(
+        "assets", description="Root-relative directory where assets are stored."
+    )
+    overwrite_existing: bool = Field(
+        False,
+        description="Allow create operations to overwrite existing files whose content differs.",
+    )
+
+
+def _error(
+    code: str,
+    summary: str,
+    *,
+    path: str | None = None,
+    root: Path | None = None,
+    hint: str | None = None,
+) -> FsError:
+    """Build a provider-owned error already carrying the ``local_files`` namespace."""
+    return FsError(
+        code, summary, path=path, root=root, hint=hint, namespace=ERROR_NAMESPACE
+    )
+
+
+@contextlib.contextmanager
+def _namespaced() -> Iterator[None]:
+    """Re-raise un-namespaced helper errors with the ``local_files`` namespace."""
+    try:
+        yield
+    except FsError as exc:
+        if exc.namespace is not None:
+            raise
+        raise exc.with_namespace(ERROR_NAMESPACE) from exc
+
+
+class LocalFilesProvider:
+    """Document provider backed by Markdown files below a root directory."""
+
+    provider_id = ERROR_NAMESPACE
+
+    def __init__(self, settings: LocalFilesProviderSettings) -> None:
+        self.settings = settings
+        self._root_real: Path | None = None
+        self._cwd: Path | None = None
+        self._assets_real: Path | None = None
+
+    # -- resolved settings -------------------------------------------------
+
+    def _ensure_resolved(self) -> Path:
+        """Resolve the root and assets directory once; never writes."""
+        if self._root_real is None:
+            cwd = Path.cwd()
+            with _namespaced():
+                root_real = _fs.resolve_root(self.settings.root, cwd=cwd)
+            self._assets_real = self._resolve_assets_dir(root_real)
+            self._cwd = cwd
+            self._root_real = root_real
+        return self._root_real
+
+    def _resolve_assets_dir(self, root_real: Path) -> Path:
+        try:
+            return _fs.resolve_within_root(root_real, self.settings.assets_dir)
+        except FsError as exc:
+            raise _error(
+                "settings.assets_dir_invalid",
+                f"Setting 'assets_dir' is invalid ({exc.code}: {exc.summary})",
+                path=self.settings.assets_dir,
+                root=root_real,
+                hint=exc.hint,
+            ) from exc
+
+    # -- DocumentProvider --------------------------------------------------
+
+    def capabilities(self) -> set[ProviderCapability]:
+        return {
+            ProviderCapability.READ_DOCUMENT,
+            ProviderCapability.CHECK_EXISTS,
+            ProviderCapability.BUILD_LINK,
+            ProviderCapability.RESOLVE_BY_PATH,
+        }
+
+    def validate_settings(self) -> None:
+        self._ensure_resolved()
+
+    def resolve_ref(
+        self, ref: DocumentRef, ctx: Optional[ExecutionContext] = None
+    ) -> DocumentRef:
+        self._locate(ref)
+        if not ref.provider:
+            return ref.model_copy(update={"provider": self.settings.provider_name})
+        return ref
+
+    def exists(self, ref: DocumentRef) -> bool:
+        _, real = self._locate(ref)
+        return real.is_file()
+
+    def get_document(self, ref: DocumentRef) -> Document:
+        relative, real = self._locate(ref)
+        root_real = self._ensure_resolved()
+        if not real.exists():
+            raise _error(
+                "document.not_found",
+                f"Document does not exist (absolute='{real}', cwd='{self._cwd}')",
+                path=relative,
+                root=root_real,
+                hint="create the document first or remove the ref from the plugin's required refs",
+            )
+        if not real.is_file():
+            raise _error(
+                "path.not_a_file",
+                "Document path is not a regular file",
+                path=relative,
+                root=root_real,
+                hint="point the ref at a Markdown file, not a directory",
+            )
+        try:
+            data = real.read_bytes()
+        except OSError as exc:
+            raise _error(
+                "io.error",
+                f"Could not read the document ({type(exc).__name__}: {exc})",
+                path=relative,
+                root=root_real,
+                hint="check the permissions of the file",
+            ) from exc
+        with _namespaced():
+            content = _fs.decode_text(data, path=relative)
+        version = _fs.content_version(data)
+        return Document(
+            ref=ref,
+            title=PurePosixPath(relative).stem,
+            content=content,
+            version=DocumentVersion(token=version, etag=version),
+            metadata={
+                "path": relative,
+                "absolute_path": str(real),
+                "size_bytes": len(data),
+            },
+        )
+
+    def build_link(self, ref: DocumentRef) -> Optional[str]:
+        _, real = self._locate(ref)
+        return real.as_uri()
+
+    def put_asset(self, operation: PutAssetOperation, content: bytes) -> Asset:
+        raise NotImplementedError(_WRITE_SIDE_PENDING)
+
+    def build_asset_reference(self, ref: AssetRef) -> str:
+        raise NotImplementedError(_WRITE_SIDE_PENDING)
+
+    def apply_changes(self, changeset: ChangeSet) -> ApplyResult:
+        raise NotImplementedError(_WRITE_SIDE_PENDING)
+
+    # -- Host hook ---------------------------------------------------------
+
+    def describe_target(self) -> str:
+        """Describe where this provider reads and writes, for the plan note."""
+        root_real = self._ensure_resolved()
+        configured = self.settings.root.strip()
+        parts = [f"root='{root_real}'"]
+        if configured.startswith("~") or not Path(configured).is_absolute():
+            parts.append(f"configured='{self.settings.root}'")
+        parts.append(f"cwd='{self._cwd}'")
+        parts.append(f"assets_dir='{self._assets_real}'")
+        return " ".join(parts)
+
+    # -- Path resolution ---------------------------------------------------
+
+    def _locate(self, ref: DocumentRef) -> tuple[str, Path]:
+        """Validate ``ref`` and return its root-relative path and real path."""
+        relative = self._path_of(ref)
+        root_real = self._ensure_resolved()
+        with _namespaced():
+            _fs.validate_relative_path(relative)
+            require_markdown_path(relative)
+            return relative, _fs.resolve_within_root(root_real, relative)
+
+    @staticmethod
+    def _path_of(ref: DocumentRef) -> str:
+        if ref.kind != RefKind.PATH:
+            raise _error(
+                "ref.unsupported_kind",
+                f"local_files requires path refs with locator.path (got kind '{ref.kind.value}')",
+                hint=_PATH_REFS_HINT,
+            )
+        path = ref.locator.get("path")
+        if path is None:
+            raise _error(
+                "ref.missing_path",
+                "local_files requires path refs with locator.path (locator.path is missing)",
+                hint=_PATH_REFS_HINT,
+            )
+        return path
+
+
+class LocalFilesProviderFactory:
+    """Factory for ``local_files`` providers."""
+
+    provider_id = LocalFilesProvider.provider_id
+    settings_model = LocalFilesProviderSettings
+
+    def create(
+        self, settings: LocalFilesProviderSettings | Dict[str, Any]
+    ) -> LocalFilesProvider:
+        typed_settings = (
+            settings
+            if isinstance(settings, LocalFilesProviderSettings)
+            else self.settings_model.model_validate(settings)
+        )
+        return LocalFilesProvider(typed_settings)
