@@ -11,7 +11,7 @@ It orchestrates documentation automation workflows around `wikiops-sdk` by loadi
 - Runtime loading for plugins and providers through Python entry points.
 - YAML configuration loading for providers, profiles, refs, and plugin config.
 - Document loading, diff rendering, and apply delegation.
-- A built-in Azure DevOps Wiki provider.
+- Built-in providers for Azure DevOps Wiki and for local Markdown files.
 - A strict `pytest` suite with coverage enforcement.
 
 ## What This Repository Does Not Contain
@@ -63,9 +63,10 @@ poetry run wikiops plugins
 poetry run wikiops providers
 ```
 
-The host currently ships with a built-in provider implementation:
+The host currently ships with these built-in provider implementations:
 
 - `azure_devops_wiki`
+- `local_files`
 
 Plugins are expected to be installed separately through Python packages that expose the `wikiops.plugins` entry point group.
 
@@ -94,6 +95,27 @@ profiles:
       acme.team-docs:
         parent_alias: docs_root
 ```
+
+To write documents as Markdown files in a local directory instead, use the `local_files` provider. Ref paths are relative to `root` and end in `.md`:
+
+```yaml
+providers:
+  local:
+    type: local_files
+    root: ./docs
+
+profiles:
+  default:
+    provider: local
+    refs:
+      docs_root:
+        provider: local
+        kind: path
+        locator:
+          path: README.md
+```
+
+A relative `root` resolves against the current working directory. Plans include a `provider_target` note with the resolved root; read it before applying. See [`docs/reference/local-files.md`](docs/reference/local-files.md).
 
 ### Example Input
 
@@ -154,6 +176,7 @@ Start here depending on your role:
 - Building a provider for this host: [`docs/guides/build-a-provider.md`](docs/guides/build-a-provider.md)
 - Need module-level runtime reference: [`docs/reference/core-modules.md`](docs/reference/core-modules.md)
 - Need the built-in Azure DevOps provider reference: [`docs/reference/azure-devops-wiki.md`](docs/reference/azure-devops-wiki.md)
+- Need the built-in local files provider reference: [`docs/reference/local-files.md`](docs/reference/local-files.md)
 - Need host internal boundaries: [`docs/reference/internal-boundaries.md`](docs/reference/internal-boundaries.md)
 
 The full host documentation index lives at [`docs/index.md`](docs/index.md).

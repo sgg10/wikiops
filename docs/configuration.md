@@ -62,6 +62,44 @@ wiki: platform
 pat_token_env: AZDO_PAT
 ```
 
+### Built-In Provider Types
+
+The host currently ships two provider implementations. Run `wikiops providers` to confirm which types are discoverable in the current environment.
+
+| `type` | Stores documents in | Reference |
+| --- | --- | --- |
+| `azure_devops_wiki` | an Azure DevOps Wiki | [`reference/azure-devops-wiki.md`](reference/azure-devops-wiki.md) |
+| `local_files` | Markdown files below a local root directory | [`reference/local-files.md`](reference/local-files.md) |
+
+### Local Files Example
+
+```yaml
+providers:
+  local:
+    type: local_files
+    root: ./docs
+    assets_dir: assets
+    overwrite_existing: false
+
+profiles:
+  default:
+    provider: local
+    refs:
+      guide:
+        provider: local
+        kind: path
+        locator:
+          path: guide/README.md
+```
+
+`local_files` settings:
+
+- `root` (required): directory that holds every document; `~` is expanded and a relative value resolves against the working directory of the process, not against the config file
+- `assets_dir` (optional, default `assets`): root-relative directory for stored assets
+- `overwrite_existing` (optional, default `false`): allow create operations to replace an existing file with different content
+
+Unknown keys are rejected. Ref paths for this provider are relative to `root`, use `/` separators, have no leading `/`, and end in `.md`; this differs from Azure DevOps paths such as `/Engineering/Teams`. The host prints a `provider_target` note on every plan showing the resolved root and working directory; check it before applying. See [`reference/local-files.md`](reference/local-files.md) for the full behavior.
+
 ## Profiles
 
 Each profile defines one execution context selection for a run.

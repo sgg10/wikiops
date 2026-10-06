@@ -4,7 +4,7 @@ These are runtime facts the agent should keep in mind.
 
 ## 1. The host ships no built-in plugins
 
-`wikiops` includes the CLI and the built-in Azure DevOps provider, but not business plugins.
+`wikiops` includes the CLI and the built-in providers (Azure DevOps Wiki and local files), but not business plugins.
 
 Always verify plugin availability with:
 
@@ -96,3 +96,21 @@ In source checkouts, it may be necessary to use:
 ```bash
 poetry run wikiops ...
 ```
+
+## 13. Read the `provider_target` note before `--apply`
+
+Providers that can describe their target, such as `local_files`, add a `provider_target` note as the first entry of `ChangeSet.notes`. It shows the resolved root and the working directory. A relative `root` resolves against the directory the command is launched from, so the same config can write to a different place from a different directory.
+
+Before `--apply`, confirm `root=` is the directory the user intended. If a `provider_target_unavailable` warning appears instead, the target could not be confirmed.
+
+## 14. `local_files` paths are root-relative and end in `.md`
+
+Refs for `local_files` look like `guide/README.md`: no leading `/`, `/` separators, `.md` suffix. Azure-style paths such as `/Engineering/Teams` fail with `path.absolute`. Paths are never auto-corrected; use the `Hint:` in the error.
+
+## 15. Plans show no diff for `local_files` creates
+
+The diff covers updates. A create conflict (`conflict.exists`) only appears when applying, and a create is not atomic with respect to other processes: do not run two applies against the same root at once. See [Local files provider reference](local-files-provider.md).
+
+## 16. `resolved_asset_reference` is not what a `local_files` document contains
+
+With `local_files`, `=== APPLY RESULT ===` shows the generic `/assets/...` reference for an uploaded asset, while the written Markdown files contain links relative to each document. Verify links by reading the file with `wikiops docs get`.

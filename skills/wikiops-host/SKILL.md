@@ -1,6 +1,6 @@
 ---
 name: wikiops-host
-description: Use this skill when the user wants to configure or operate the WikiOps host in natural language: inspect installed plugins or providers, create or update a WikiOps YAML config, configure the built-in Azure DevOps Wiki provider, read the current content of a page with `wikiops docs get`, or execute a plugin with an input YAML through `wikiops run` in plan or apply mode. If a companion plugin skill exists, use it for plugin-specific input or business rules, then return to this skill for host execution and verification.
+description: Use this skill when the user wants to configure or operate the WikiOps host in natural language: inspect installed plugins or providers, create or update a WikiOps YAML config, configure the built-in Azure DevOps Wiki or local files provider, read the current content of a page with `wikiops docs get`, or execute a plugin with an input YAML through `wikiops run` in plan or apply mode. If a companion plugin skill exists, use it for plugin-specific input or business rules, then return to this skill for host execution and verification.
 compatibility: Requires a shell with the `wikiops` CLI available directly or through `poetry run wikiops`. Azure DevOps flows require `AZDO_PAT` or the configured PAT env var.
 metadata:
   author: sgg10
@@ -18,6 +18,7 @@ Use this skill when the user wants help with the WikiOps host runtime itself:
 - create or update `config.yaml` or `wikiops.yaml`
 - inspect installed plugins or providers
 - configure the built-in `azure_devops_wiki` provider
+- configure the built-in `local_files` provider (Markdown files in a local directory)
 - read the current content of an existing page
 - run a plugin with an input YAML
 - plan changes first, then optionally apply them
@@ -78,6 +79,7 @@ If a companion plugin skill exists, prefer it over reconstructing the plugin inp
      - Generate or update the input YAML
      - Run `wikiops run` in plan mode first
      - Inspect `=== CHANGESET ===` and `=== DIFF ===`
+     - If `ChangeSet.notes` starts with a `provider_target` note, read it (resolved root, working directory) before any `--apply`
     - Only use `--apply` when the user explicitly wants persistence
 
 5. After apply.
@@ -99,6 +101,10 @@ For the built-in Azure DevOps Wiki provider, read:
 
 - [Azure DevOps provider reference](references/azure-devops-provider.md)
 
+For the built-in local files provider, including how to react to each `[local_files:<code>]` error, read:
+
+- [Local files provider reference](references/local-files-provider.md)
+
 For end-to-end workflows, read:
 
 - [Host workflows](references/workflows.md)
@@ -117,7 +123,9 @@ For pitfalls and runtime constraints, read:
 - Do not add plugin config or plugin refs to host config unless the current workflow actually needs them
 - Do not override plugin template paths or block names unless there is a concrete reason to diverge from plugin defaults
 - Do not assume plugins are built into the host; verify with `wikiops plugins`
-- Do not assume providers beyond the built-in `azure_devops_wiki`; verify with `wikiops providers`
+- Do not assume which providers are installed; verify with `wikiops providers`
+- Before `wikiops run --apply`, read the `provider_target` note in the plan output (when present) and confirm the resolved root and working directory are the ones the user intends; a `provider_target_unavailable` warning means the target could not be confirmed
+- For `local_files` failures, read the `Hint:` in the `[local_files:<code>]` message and follow [Local files provider reference](references/local-files-provider.md); never change `overwrite_existing` or `root` on your own to get past an error
 - If the Azure DevOps PAT env var is missing, stop and ask the user to provide or export it
 - If the workflow uses local assets, ensure the plugin config allows the asset roots or intentionally disables that protection
 - Do not start post-run verification reads before `wikiops run --apply` has fully finished
@@ -161,6 +169,7 @@ When the user asks for a plugin-driven documentation update:
 - "Lee el contenido actual de la página `sample_dp`"
 - "Ejecuta el plugin `nequi.datamind` con este input yaml"
 - "Crea o actualiza mi `config.yaml` para que use el provider de Azure DevOps"
+- "Configura WikiOps para escribir la documentación como archivos Markdown en la carpeta `./docs`"
 - "Dado que ya existe una página, lee su contenido actual y luego corre WikiOps con el input que produzca la skill del plugin"
 
 ## Validation loop
@@ -168,7 +177,7 @@ When the user asks for a plugin-driven documentation update:
 1. Inspect providers and plugins first.
 2. Validate the config path and input path exist.
 3. Prefer `wikiops run` without `--apply`.
-4. Review the `ChangeSet` and diff before persisting.
+4. Review the `ChangeSet` and diff before persisting, including the `provider_target` note when present.
 5. If apply was requested, inspect `ApplyResult` before declaring success.
 6. When the run updates or creates a page, verify the resulting content with `wikiops docs get`.
 
@@ -177,9 +186,11 @@ When the user asks for a plugin-driven documentation update:
 - [CLI reference](references/cli.md)
 - [Configuration reference](references/configuration.md)
 - [Azure DevOps provider reference](references/azure-devops-provider.md)
+- [Local files provider reference](references/local-files-provider.md)
 - [Host workflows](references/workflows.md)
 - [Gotchas](references/gotchas.md)
 - [Azure DevOps config example](assets/config.azure-devops.example.yaml)
+- [Local files config example](assets/config.local-files.example.yaml)
 - [Activation eval queries](assets/eval-queries.json)
 
 ## Design note

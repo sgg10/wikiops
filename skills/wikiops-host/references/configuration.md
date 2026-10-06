@@ -33,6 +33,26 @@ Rules:
 - the provider key, such as `azdo`, becomes the runtime `provider_name`
 - all fields except `type` become provider settings
 
+Provider types are discovered at runtime; confirm them with `wikiops providers`. The built-in types are `azure_devops_wiki` and `local_files`.
+
+Example for the built-in `local_files` provider:
+
+```yaml
+providers:
+  local:
+    type: local_files
+    root: ./docs
+    assets_dir: assets
+    overwrite_existing: false
+```
+
+Rules for `local_files`:
+
+- `root` is required, must already exist, and a relative value resolves against the working directory of the command, not the config file
+- ref paths for this provider are relative to `root`, have no leading `/`, and end in `.md` (for example `guide/README.md`)
+- unknown settings keys are rejected
+- see [Local files provider reference](local-files-provider.md) before configuring or debugging it
+
 ## `profiles`
 
 Each profile selects one provider and contains refs plus profile-scoped plugin config.
@@ -101,11 +121,12 @@ Rules:
 - prefer the manifest plugin ID as the config key
 - do not guess the plugin config schema; use the plugin skill or plugin docs
 
-## Complete example using the built-in Azure DevOps provider
+## Complete examples using the built-in providers
 
 See:
 
 - [Azure DevOps config example](../assets/config.azure-devops.example.yaml)
+- [Local files config example](../assets/config.local-files.example.yaml)
 
 ## Practical guidance for agents
 
