@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import errno
+import hashlib
 import os
 import pickle
+import re
+import stat
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -692,3 +696,527 @@ def test_resolve_root_reports_missing_root_when_no_ancestor_exists(
     assert f"cwd='{tmp_path}'" in str(error)
     assert "Hint: " in str(error)
     assert 0 < nothing_exists["count"] <= _PROBE_LIMIT
+
+
+# ---------------------------------------------------------------------------
+# make_dirs_within_root (FS-5)
+# ---------------------------------------------------------------------------
+
+
+def _dirs(root: Path, relative: str) -> Path:
+    return _fs.make_dirs_within_root(root, PurePosixPath(relative))
+
+
+def test_make_dirs_within_root_creates_nested_directories_stepwise(root: Path) -> None:
+    result = _dirs(root, "a/b/c")
+
+    assert result == root / "a" / "b" / "c"
+    assert (root / "a" / "b" / "c").is_dir()
+
+
+def test_make_dirs_within_root_is_idempotent_for_existing_directories(root: Path) -> None:
+    (root / "docs" / "guide").mkdir(parents=True)
+    (root / "docs" / "keep.md").write_text("keep")
+
+    assert _dirs(root, "docs/guide") == root / "docs" / "guide"
+    assert _dirs(root, "docs/guide/deeper") == root / "docs" / "guide" / "deeper"
+    assert (root / "docs" / "keep.md").read_text() == "keep"
+
+
+def test_make_dirs_within_root_returns_root_for_an_empty_relative_dir(root: Path) -> None:
+    assert _fs.make_dirs_within_root(root, PurePosixPath()) == root
+
+
+def test_make_dirs_within_root_rejects_non_canonical_input_before_any_mkdir(
+    root: Path, outside: Path
+) -> None:
+    with pytest.raises(FsError) as excinfo:
+        _dirs(root, "../outside/leak")
+
+    assert excinfo.value.code == "path.traversal"
+    assert not (outside / "leak").exists()
+
+
+def test_make_dirs_within_root_refuses_a_regular_file_component(root: Path) -> None:
+    (root / "docs").mkdir()
+    (root / "docs" / "examples").write_text("i am a file")
+
+    with pytest.raises(FsError) as excinfo:
+        _dirs(root, "docs/examples/deep")
+
+    error = excinfo.value
+    assert error.code == "path.parent_not_directory"
+    assert error.path == "docs/examples"
+    assert error.root == root
+    assert "Hint: " in str(error)
+    assert (root / "docs" / "examples").read_text() == "i am a file"
+    assert not (root / "docs" / "examples" / "deep").exists()
+
+
+def test_make_dirs_within_root_refuses_a_file_as_the_last_component(root: Path) -> None:
+    (root / "notes").write_text("x")
+
+    with pytest.raises(FsError) as excinfo:
+        _dirs(root, "notes")
+
+    assert excinfo.value.code == "path.parent_not_directory"
+    assert excinfo.value.path == "notes"
+
+
+def test_make_dirs_within_root_refuses_existing_symlink_to_outside_directory(
+    root: Path, outside: Path, make_symlink
+) -> None:
+    (root / "docs").mkdir()
+    make_symlink(root / "docs" / "link", outside)
+
+    with pytest.raises(FsError) as excinfo:
+        _dirs(root, "docs/link/sub")
+
+    assert excinfo.value.code == "path.symlink_escape"
+    assert list(outside.iterdir()) == []
+
+
+def test_make_dirs_within_root_follows_in_root_symlinked_directory(
+    root: Path, make_symlink
+) -> None:
+    (root / "real").mkdir()
+    make_symlink(root / "alias", root / "real")
+
+    result = _dirs(root, "alias/sub")
+
+    assert result == root / "real" / "sub"
+    assert (root / "real" / "sub").is_dir()
+
+
+def test_make_dirs_within_root_falls_through_when_directory_appears_concurrently(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_mkdir = os.mkdir
+
+    def racing_mkdir(path, mode=0o777, **kwargs):  # noqa: ANN001, ANN003, ANN202
+        real_mkdir(path, mode, **kwargs)
+        raise FileExistsError(errno.EEXIST, "File exists", str(path))
+
+    monkeypatch.setattr(os, "mkdir", racing_mkdir)
+
+    assert _dirs(root, "a/b") == root / "a" / "b"
+    assert (root / "a" / "b").is_dir()
+
+
+def test_make_dirs_within_root_refuses_a_component_swapped_for_an_outside_symlink(
+    root: Path, outside: Path, make_symlink, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_mkdir = os.mkdir
+
+    def swapping_mkdir(path, mode=0o777, **kwargs):  # noqa: ANN001, ANN003, ANN202
+        real_mkdir(path, mode, **kwargs)
+        if Path(path).name == "swapped":
+            Path(path).rmdir()
+            make_symlink(Path(path), outside)
+
+    monkeypatch.setattr(os, "mkdir", swapping_mkdir)
+
+    with pytest.raises(FsError) as excinfo:
+        _dirs(root, "swapped/inner")
+
+    assert excinfo.value.code == "path.symlink_escape"
+    assert list(outside.iterdir()) == []
+
+
+def test_make_dirs_within_root_maps_os_errors_to_io_error(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def denied(path, mode=0o777, **kwargs):  # noqa: ANN001, ANN003, ANN202
+        raise PermissionError(errno.EACCES, "Permission denied", str(path))
+
+    monkeypatch.setattr(os, "mkdir", denied)
+
+    with pytest.raises(FsError) as excinfo:
+        _dirs(root, "docs")
+
+    error = excinfo.value
+    assert error.code == "io.error"
+    assert str(error).startswith("[io.error] ")
+    assert "PermissionError" in error.summary
+    assert error.path == "docs"
+    assert "Hint: " in str(error)
+    assert isinstance(error.__cause__, PermissionError)
+
+
+# ---------------------------------------------------------------------------
+# atomic_write_bytes (FS-5)
+# ---------------------------------------------------------------------------
+
+posix_modes = pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+
+
+def _write(root: Path, relative: str, data: bytes) -> None:
+    _fs.atomic_write_bytes(root.joinpath(*relative.split("/")), data, root_real=root)
+
+
+def _names(directory: Path) -> list[str]:
+    return sorted(entry.name for entry in directory.iterdir())
+
+
+def test_atomic_write_bytes_creates_a_new_file_with_parents(root: Path) -> None:
+    _write(root, "a/b/c.md", b"x")
+
+    assert (root / "a" / "b" / "c.md").read_bytes() == b"x"
+    assert _names(root / "a" / "b") == ["c.md"]
+
+
+def test_atomic_write_bytes_writes_a_file_directly_under_the_root(root: Path) -> None:
+    _write(root, "top.md", b"top")
+
+    assert _names(root) == ["top.md"]
+    assert (root / "top.md").read_bytes() == b"top"
+
+
+def test_atomic_write_bytes_replaces_existing_content_and_leaves_no_temp_files(
+    root: Path,
+) -> None:
+    (root / "a.md").write_bytes(b"old")
+
+    _write(root, "a.md", b"new")
+
+    assert (root / "a.md").read_bytes() == b"new"
+    assert _names(root) == ["a.md"]
+
+
+@pytest.mark.parametrize(
+    "data",
+    [b"a\r\nb\r\n", b"\xef\xbb\xbfhi\r\n", b"mixed\r\nlf\nand\rcr", b""],
+    ids=["crlf", "bom", "mixed-newlines", "empty"],
+)
+def test_atomic_write_bytes_round_trips_bytes_exactly(root: Path, data: bytes) -> None:
+    _write(root, "doc.md", data)
+
+    assert (root / "doc.md").read_bytes() == data
+
+
+@posix_modes
+def test_atomic_write_bytes_preserves_the_mode_of_an_existing_file(root: Path) -> None:
+    target = root / "a.md"
+    target.write_bytes(b"old")
+    target.chmod(0o640)
+
+    _write(root, "a.md", b"new")
+
+    assert stat.S_IMODE(target.stat().st_mode) == 0o640
+
+
+@posix_modes
+@pytest.mark.parametrize(("umask", "expected"), [(0o022, 0o644), (0o077, 0o600)])
+def test_atomic_write_bytes_gives_new_files_umask_derived_permissions(
+    root: Path, umask: int, expected: int
+) -> None:
+    previous = os.umask(umask)
+    try:
+        _write(root, "new.md", b"x")
+    finally:
+        os.umask(previous)
+
+    assert stat.S_IMODE((root / "new.md").stat().st_mode) == expected
+
+
+def test_atomic_write_bytes_writes_through_an_in_root_symlinked_file(
+    root: Path, make_symlink
+) -> None:
+    (root / "real.md").write_bytes(b"old")
+    link = make_symlink(root / "link.md", root / "real.md")
+
+    _fs.atomic_write_bytes(_fs.resolve_within_root(root, "link.md"), b"new", root_real=root)
+
+    assert (root / "real.md").read_bytes() == b"new"
+    assert link.is_symlink()
+    assert _names(root) == ["link.md", "real.md"]
+
+
+def test_atomic_write_bytes_refuses_a_directory_target(root: Path) -> None:
+    (root / "docs").mkdir()
+    (root / "docs" / "keep.md").write_bytes(b"keep")
+
+    with pytest.raises(FsError) as excinfo:
+        _write(root, "docs", b"x")
+
+    error = excinfo.value
+    assert error.code == "path.not_a_file"
+    assert error.path == "docs"
+    assert "Hint: " in str(error)
+    assert _names(root / "docs") == ["keep.md"]
+
+
+def test_atomic_write_bytes_refuses_a_file_blocking_the_parent_directory(root: Path) -> None:
+    (root / "docs").mkdir()
+    (root / "docs" / "examples").write_bytes(b"i am a file")
+
+    with pytest.raises(FsError) as excinfo:
+        _write(root, "docs/examples/deep/foo.md", b"x")
+
+    assert excinfo.value.code == "path.parent_not_directory"
+    assert excinfo.value.path == "docs/examples"
+    assert (root / "docs" / "examples").read_bytes() == b"i am a file"
+    assert _names(root / "docs") == ["examples"]
+
+
+def test_atomic_write_bytes_refuses_a_target_outside_the_root(root: Path, outside: Path) -> None:
+    with pytest.raises(FsError) as excinfo:
+        _fs.atomic_write_bytes(outside / "x.md", b"x", root_real=root)
+
+    assert excinfo.value.code == "path.symlink_escape"
+    assert list(outside.iterdir()) == []
+
+
+def test_atomic_write_bytes_keeps_the_original_and_cleans_up_when_replace_fails(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (root / "a.md").write_bytes(b"old")
+
+    def failing_replace(src, dst, **kwargs):  # noqa: ANN001, ANN003, ANN202
+        raise OSError(errno.EIO, "replace failed")
+
+    monkeypatch.setattr(os, "replace", failing_replace)
+
+    with pytest.raises(FsError) as excinfo:
+        _write(root, "a.md", b"new")
+
+    assert excinfo.value.code == "io.error"
+    assert isinstance(excinfo.value.__cause__, OSError)
+    assert (root / "a.md").read_bytes() == b"old"
+    assert _names(root) == ["a.md"]
+
+
+def test_atomic_write_bytes_removes_the_temp_file_when_the_data_write_fails(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def failing_fsync(fd):  # noqa: ANN001, ANN202
+        raise OSError(errno.ENOSPC, "disk full")
+
+    monkeypatch.setattr(os, "fsync", failing_fsync)
+
+    with pytest.raises(FsError) as excinfo:
+        _write(root, "new.md", b"x")
+
+    assert excinfo.value.code == "io.error"
+    assert "disk full" in excinfo.value.summary
+    assert _names(root) == []
+
+
+def test_atomic_write_bytes_tolerates_a_directory_fsync_failure(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_open = os.open
+
+    def open_refusing_directories(path, flags, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+        if Path(path).is_dir():
+            raise PermissionError(errno.EACCES, "cannot open directory")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", open_refusing_directories)
+
+    _write(root, "a.md", b"x")
+
+    assert (root / "a.md").read_bytes() == b"x"
+
+
+def test_atomic_write_bytes_maps_permission_errors_to_io_error(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_open = os.open
+
+    def deny_creation(path, flags, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+        if flags & os.O_EXCL:
+            raise PermissionError(errno.EACCES, "Permission denied")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", deny_creation)
+
+    with pytest.raises(FsError) as excinfo:
+        _write(root, "docs/a.md", b"x")
+
+    error = excinfo.value
+    assert error.code == "io.error"
+    assert str(error).startswith("[io.error] ")
+    assert "PermissionError" in error.summary
+    assert error.path == "docs/a.md"
+    assert error.root == root
+    assert "Hint: " in str(error)
+    assert isinstance(error.__cause__, PermissionError)
+
+
+def _after_first_fsync(monkeypatch: pytest.MonkeyPatch, action) -> None:  # noqa: ANN001
+    """Run ``action`` once, right after the temp file data is flushed."""
+    real_fsync = os.fsync
+    state = {"done": False}
+
+    def fsync(fd):  # noqa: ANN001, ANN202
+        real_fsync(fd)
+        if not state["done"]:
+            state["done"] = True
+            action()
+
+    monkeypatch.setattr(os, "fsync", fsync)
+
+
+def test_atomic_write_bytes_refuses_a_target_swapped_for_an_outside_symlink(
+    root: Path, outside: Path, make_symlink, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (root / "docs").mkdir()
+    target = root / "docs" / "a.md"
+    target.write_bytes(b"old")
+
+    def swap() -> None:
+        target.unlink()
+        make_symlink(target, outside / "stolen.md")
+
+    _after_first_fsync(monkeypatch, swap)
+
+    with pytest.raises(FsError) as excinfo:
+        _write(root, "docs/a.md", b"new")
+
+    assert excinfo.value.code == "path.symlink_escape"
+    assert list(outside.iterdir()) == []
+    assert _names(root / "docs") == ["a.md"]
+    assert target.is_symlink()
+
+
+def test_atomic_write_bytes_refuses_a_parent_swapped_for_an_outside_symlink(
+    root: Path, outside: Path, make_symlink, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (root / "docs").mkdir()
+
+    def swap() -> None:
+        (root / "docs").rename(root / "docs-moved")
+        make_symlink(root / "docs", outside)
+
+    _after_first_fsync(monkeypatch, swap)
+
+    with pytest.raises(FsError) as excinfo:
+        _write(root, "docs/a.md", b"new")
+
+    assert excinfo.value.code == "path.symlink_escape"
+    assert list(outside.iterdir()) == []
+
+
+# ---------------------------------------------------------------------------
+# decode_text / content_version (FS-6)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("data", "expected"),
+    [
+        (b"hello", "hello"),
+        ("Ñandú ✓".encode(), "Ñandú ✓"),
+        (b"a\r\nb\r\n", "a\r\nb\r\n"),
+        (b"a\rb", "a\rb"),
+    ],
+    ids=["ascii", "unicode", "crlf-untranslated", "lone-cr-untranslated"],
+)
+def test_decode_text_decodes_strict_utf8_without_newline_translation(
+    data: bytes, expected: str
+) -> None:
+    assert _fs.decode_text(data, path="docs/a.md") == expected
+
+
+def test_decode_text_keeps_the_bom_as_a_leading_character() -> None:
+    text = _fs.decode_text(b"\xef\xbb\xbfhi", path="docs/a.md")
+
+    assert text == "﻿hi"
+    assert text.startswith("﻿")
+
+
+def test_decode_text_names_the_file_when_bytes_are_not_utf8() -> None:
+    with pytest.raises(FsError) as excinfo:
+        _fs.decode_text(b"ok\xff\xfe", path="docs/bad.md")
+
+    error = excinfo.value
+    assert error.code == "document.decode_error"
+    assert error.path == "docs/bad.md"
+    assert "utf-8" in error.summary
+    assert "Hint: " in str(error)
+    assert str(error).startswith("[document.decode_error] ")
+    assert isinstance(error.__cause__, UnicodeDecodeError)
+
+
+def test_decode_text_honours_an_explicit_encoding() -> None:
+    assert _fs.decode_text("ñ".encode("latin-1"), path="a.md", encoding="latin-1") == "ñ"
+
+
+def test_content_version_is_the_prefixed_lowercase_sha256_digest() -> None:
+    assert _fs.content_version(b"hello") == (
+        "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+    )
+
+
+@pytest.mark.parametrize("data", [b"", b"a", b"a\r\nb", b"\xef\xbb\xbfhi"])
+def test_content_version_matches_hashlib_for_any_bytes(data: bytes) -> None:
+    assert _fs.content_version(data) == f"sha256:{hashlib.sha256(data).hexdigest()}"
+
+
+def test_content_version_differs_for_different_bytes() -> None:
+    assert _fs.content_version(b"a\n") != _fs.content_version(b"a\r\n")
+
+
+# ---------------------------------------------------------------------------
+# hashed_asset_name (FS-7)
+# ---------------------------------------------------------------------------
+
+
+def test_hashed_asset_name_is_deterministic_and_embeds_the_content_hash() -> None:
+    first = _fs.hashed_asset_name("My Diagram.png", b"abc")
+    second = _fs.hashed_asset_name("My Diagram.png", b"abc")
+
+    assert first == second
+    assert re.fullmatch(r"My-Diagram--[0-9a-f]{16}\.png", first)
+    assert first == "My-Diagram--ba7816bf8f01cfea.png"
+
+
+def test_hashed_asset_name_changes_when_the_bytes_change() -> None:
+    assert _fs.hashed_asset_name("a.png", b"abc") != _fs.hashed_asset_name("a.png", b"abd")
+
+
+@pytest.mark.parametrize(
+    ("filename", "stem_and_suffix"),
+    [
+        ("diagram.PNG", "diagram--{h}.PNG"),
+        ("My Diagram.final.png", "My-Diagram.final--{h}.png"),
+        ("a   b!!c.png", "a-b-c--{h}.png"),
+        ("--edge--.png", "edge--{h}.png"),
+        ("###.png", "asset--{h}.png"),
+        ("README", "README--{h}"),
+        ("Diagrama ñandú.png", "Diagrama-and--{h}.png"),
+        ("a.p g", "a--{h}.p-g"),
+        (".png", "png--{h}"),
+    ],
+)
+def test_hashed_asset_name_sanitizes_the_stem_and_preserves_the_suffix(
+    filename: str, stem_and_suffix: str
+) -> None:
+    digest = hashlib.sha256(b"abc").hexdigest()[:16]
+
+    assert _fs.hashed_asset_name(filename, b"abc") == stem_and_suffix.format(h=digest)
+
+
+@pytest.mark.parametrize("filename", [None, "", "   "])
+def test_hashed_asset_name_requires_a_name(filename: str | None) -> None:
+    with pytest.raises(FsError) as excinfo:
+        _fs.hashed_asset_name(filename, b"abc")
+
+    assert excinfo.value.code == "asset.missing_name"
+    assert "Hint: " in str(excinfo.value)
+    assert str(excinfo.value).startswith("[asset.missing_name] ")
+
+
+@pytest.mark.parametrize(
+    "filename", ["../x.png", "a/b.png", "a\\b.png", "/abs.png", "..", "x..png"]
+)
+def test_hashed_asset_name_rejects_names_with_separators_or_dot_dot(filename: str) -> None:
+    with pytest.raises(FsError) as excinfo:
+        _fs.hashed_asset_name(filename, b"abc")
+
+    error = excinfo.value
+    assert error.code == "asset.invalid_name"
+    assert error.path == filename
+    assert "Hint: " in str(error)
+    assert str(error).startswith("[asset.invalid_name] ")

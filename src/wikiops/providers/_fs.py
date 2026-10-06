@@ -10,9 +10,13 @@ through :meth:`FsError.with_namespace`.
 
 from __future__ import annotations
 
+import contextlib
 import errno
+import hashlib
 import os
 import re
+import secrets
+import stat
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from typing import Union
@@ -322,3 +326,173 @@ def ensure_within_root(root_real: Path, candidate: Path) -> Path:
 def resolve_within_root(root_real: Path, relative: str) -> Path:
     """Validate ``relative`` (FS-2) and return its real absolute path inside the root."""
     return ensure_within_root(root_real, root_real.joinpath(*validate_relative_path(relative).parts))
+
+
+# ---------------------------------------------------------------------------
+# Directory creation and atomic writes
+# ---------------------------------------------------------------------------
+
+_IO_HINT = "check the permissions and the free space of the target directory"
+
+
+def _io_error(exc: OSError, action: str, *, path: str, root: Path) -> FsError:
+    detail = exc.strerror or str(exc)
+    return FsError(
+        "io.error",
+        f"{action} ({type(exc).__name__}: {detail})",
+        path=path,
+        root=root,
+        hint=_IO_HINT,
+    )
+
+
+def make_dirs_within_root(root_real: Path, rel_dir: PurePosixPath) -> Path:
+    """Create ``rel_dir`` under the root one component at a time; return its real path.
+
+    Never uses ``parents=True``: every component, created or pre-existing, is
+    re-resolved and must stay inside the root (``path.symlink_escape``) and be a
+    directory (``path.parent_not_directory``). A directory that appears
+    concurrently falls through to the same checks. Directories created before a
+    later failure are left in place (empty, inside the root).
+    """
+    parts = rel_dir.parts
+    if not parts:
+        return root_real
+    validate_relative_path(rel_dir.as_posix())
+    current = root_real
+    for index, part in enumerate(parts):
+        candidate = current / part
+        try:
+            os.mkdir(candidate, 0o777)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise _io_error(
+                exc,
+                "Directory could not be created",
+                path="/".join(parts[: index + 1]),
+                root=root_real,
+            ) from exc
+        current = ensure_within_root(root_real, candidate)
+        if not current.is_dir():
+            raise FsError(
+                "path.parent_not_directory",
+                "A path segment exists but is not a directory",
+                path="/".join(parts[: index + 1]),
+                root=root_real,
+                hint="move or remove the file, or choose a location whose parents are directories",
+            )
+    return current
+
+
+_TEMP_SUFFIX = ".wikiops.tmp"
+_NEW_FILE_FLAGS = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
+
+
+def _fsync_directory(directory: Path) -> None:
+    """Flush the directory entry to disk; best effort (not every platform allows it)."""
+    try:
+        descriptor = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    except OSError:
+        pass
+
+
+def atomic_write_bytes(target_real: Path, data: bytes, *, root_real: Path) -> None:
+    """Atomically write ``data`` to ``target_real`` inside the root.
+
+    The target is confined first, its parent is created through
+    :func:`make_dirs_within_root`, the bytes go to a temp file in the same
+    directory and are published with ``os.replace``. Updates keep the existing
+    permission bits, new files follow the umask. On any failure the original
+    file is untouched and no temp file remains. The caller encodes text, so no
+    newline translation happens here.
+    """
+    target = ensure_within_root(root_real, target_real)
+    shown = _relative_display(root_real, target)
+    if os.path.lexists(target) and not target.is_file():
+        raise FsError(
+            "path.not_a_file",
+            "Target exists and is not a regular file",
+            path=shown,
+            root=root_real,
+            hint="choose a file path, or remove the directory or special file in the way",
+        )
+    directory = make_dirs_within_root(
+        root_real, PurePosixPath(target.parent.relative_to(root_real).as_posix())
+    )
+    temp = directory / f".{target.name}.{secrets.token_hex(4)}{_TEMP_SUFFIX}"
+    try:
+        existing_mode = stat.S_IMODE(target.stat().st_mode) if target.exists() else None
+        descriptor = os.open(temp, _NEW_FILE_FLAGS, 0o666)
+        with os.fdopen(descriptor, "wb") as handle:
+            if existing_mode is not None:
+                os.chmod(temp, existing_mode)
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        ensure_within_root(root_real, target)
+        os.replace(temp, target)
+        _fsync_directory(directory)
+    except OSError as exc:
+        raise _io_error(exc, "File could not be written", path=shown, root=root_real) from exc
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(temp)
+
+
+# ---------------------------------------------------------------------------
+# Decoding, versioning and asset naming
+# ---------------------------------------------------------------------------
+
+_ASSET_UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
+_ASSET_HASH_LENGTH = 16
+_DEFAULT_ASSET_STEM = "asset"
+
+
+def decode_text(data: bytes, *, path: str, encoding: str = "utf-8") -> str:
+    """Decode ``data`` strictly; no newline translation and no BOM stripping."""
+    try:
+        return data.decode(encoding)
+    except UnicodeDecodeError as exc:
+        raise FsError(
+            "document.decode_error",
+            f"File is not valid {encoding} text ({exc.reason} at byte {exc.start})",
+            path=path,
+            hint=f"re-save the file as {encoding} or remove the invalid bytes",
+        ) from exc
+
+
+def content_version(data: bytes) -> str:
+    """Return the version token ``sha256:<hex>`` for ``data``."""
+    return f"sha256:{hashlib.sha256(data).hexdigest()}"
+
+
+def hashed_asset_name(filename: str | None, data: bytes) -> str:
+    """Return ``<safe-stem>--<sha256[:16]><suffix>`` for an asset ``filename``.
+
+    The suffix is preserved, stem characters outside ``[A-Za-z0-9._-]`` become
+    ``-`` (runs collapsed, edges stripped, empty stem -> ``asset``). The name
+    depends only on the filename and the bytes, so it is deterministic.
+    """
+    if filename is None or not filename.strip():
+        raise FsError(
+            "asset.missing_name",
+            "Asset has no file name",
+            hint="give the asset a file name such as 'diagram.png'",
+        )
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise FsError(
+            "asset.invalid_name",
+            "Asset name must be a plain file name without path separators or '..'",
+            path=filename,
+            hint="pass only the file name, e.g. 'diagram.png', not a path",
+        )
+    suffix = PurePosixPath(filename).suffix
+    stem = filename[: len(filename) - len(suffix)]
+    safe_stem = _ASSET_UNSAFE.sub("-", stem).strip("-.") or _DEFAULT_ASSET_STEM
+    digest = hashlib.sha256(data).hexdigest()[:_ASSET_HASH_LENGTH]
+    return f"{safe_stem}--{digest}{_ASSET_UNSAFE.sub('-', suffix)}"
