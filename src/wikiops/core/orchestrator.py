@@ -313,13 +313,33 @@ class DefaultDocumentationOrchestrator:
         if not isinstance(provider, TargetDescribingProvider):
             return
 
+        try:
+            target = provider.describe_target()
+        except Exception as exc:
+            # The note is informational: a failing hook must never abort the plan.
+            change_set.warnings.append(
+                WarningMessage(
+                    code="provider_target_unavailable",
+                    message=(
+                        f"Provider '{provider_name}' ({provider.provider_id}) "
+                        f"could not describe its target ({type(exc).__name__}: {exc})."
+                    ),
+                    details={
+                        "provider": provider_name,
+                        "provider_id": provider.provider_id,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+            )
+            return
+
         change_set.notes.insert(
             0,
             NoteMessage(
                 code="provider_target",
                 message=(
                     f"Provider '{provider_name}' ({provider.provider_id}) "
-                    f"target: {provider.describe_target()}"
+                    f"target: {target}"
                 ),
             ),
         )

@@ -837,6 +837,106 @@ def test_plan_internal_adds_no_note_for_provider_without_describe_target(
     ]
 
 
+class FailingTargetDescribingProvider(TargetDescribingDemoProvider):
+    """Provider whose ``describe_target`` hook raises (e.g. unresolved root)."""
+
+    def __init__(self, *args, error: Exception, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.error = error
+
+    def describe_target(self) -> str:
+        raise self.error
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        PermissionError("cannot resolve the root"),
+        ConfigurationError("[local_files:settings.root_missing] Root is missing"),
+    ],
+    ids=["PermissionError", "ConfigurationError"],
+)
+def test_plan_internal_survives_failing_describe_target(
+    doc_ref_factory,
+    document_factory,
+    error: Exception,
+) -> None:
+    ref = doc_ref_factory(provider="default", path="/inventory")
+    provider = FailingTargetDescribingProvider(
+        {ProviderCapability.READ_DOCUMENT},
+        document_factory(ref=ref),
+        error=error,
+    )
+    plugin = NotePlugin()
+    orchestrator = _wire_orchestrator(provider, plugin, document_factory)
+
+    _, _, change_set = orchestrator._plan_internal(
+        _build_config(ref, {}),
+        "default",
+        plugin.manifest.plugin_id,
+        {"title": "Example"},
+    )
+
+    assert [note.code for note in change_set.notes] == [
+        "plugin_note_a",
+        "plugin_note_b",
+    ]
+    warnings = [
+        warning
+        for warning in change_set.warnings
+        if warning.code == "provider_target_unavailable"
+    ]
+    assert len(warnings) == 1
+    assert warnings[0].message == (
+        "Provider 'default' (demo-provider) could not describe its target "
+        f"({type(error).__name__}: {error})."
+    )
+    assert warnings[0].details == {
+        "provider": "default",
+        "provider_id": "demo-provider",
+        "error_type": type(error).__name__,
+    }
+
+
+def test_apply_from_file_applies_when_describe_target_fails(
+    doc_ref_factory,
+    document_factory,
+    apply_result_factory,
+) -> None:
+    ref = doc_ref_factory(provider="default", path="/inventory")
+    provider = FailingTargetDescribingProvider(
+        {ProviderCapability.READ_DOCUMENT},
+        document_factory(ref=ref),
+        error=OSError("disk gone"),
+    )
+    plugin = RecordingPlugin()
+    plugin.resources = None
+    orchestrator = _wire_orchestrator(provider, plugin, document_factory)
+    orchestrator.config_loader = SimpleNamespace(
+        load=lambda _path: _build_config(ref, {})
+    )
+    applied: list[ChangeSet] = []
+
+    def _apply(candidate, planned, execution_ctx, resources):
+        applied.append(planned)
+        return apply_result_factory(statuses=[OperationStatus.APPLIED])
+
+    orchestrator.apply_engine = SimpleNamespace(apply=_apply)
+
+    change_set, _, _ = orchestrator.apply_from_file(
+        "config.yaml",
+        "default",
+        plugin.manifest.plugin_id,
+        {"title": "Example"},
+    )
+
+    assert applied == [change_set]
+    assert [note.code for note in change_set.notes] == []
+    assert [warning.code for warning in change_set.warnings] == [
+        "provider_target_unavailable"
+    ]
+
+
 def test_apply_from_file_applies_change_set_carrying_provider_target_note(
     doc_ref_factory,
     document_factory,
