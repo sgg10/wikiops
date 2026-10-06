@@ -61,7 +61,8 @@ It also does not contain built-in documentation plugins. Plugin business logic i
 ### Reference
 
 - [`reference/core-modules.md`](reference/core-modules.md): module-level map of the runtime
-- [`reference/azure-devops-wiki.md`](reference/azure-devops-wiki.md): built-in provider reference
+- [`reference/azure-devops-wiki.md`](reference/azure-devops-wiki.md): built-in Azure DevOps Wiki provider reference
+- [`reference/local-files.md`](reference/local-files.md): built-in local Markdown files provider reference
 - [`reference/internal-boundaries.md`](reference/internal-boundaries.md): public behavior versus internal implementation details
 
 ## Reading Paths
@@ -87,7 +88,8 @@ It also does not contain built-in documentation plugins. Plugin business logic i
 2. [`sdk-relationship.md`](sdk-relationship.md)
 3. [`guides/build-a-provider.md`](guides/build-a-provider.md)
 4. [`reference/azure-devops-wiki.md`](reference/azure-devops-wiki.md)
-5. [`wikiops-sdk provider guide`](https://github.com/sgg10/wikiops-sdk/blob/main/docs/guides/write-a-provider.md)
+5. [`reference/local-files.md`](reference/local-files.md)
+6. [`wikiops-sdk provider guide`](https://github.com/sgg10/wikiops-sdk/blob/main/docs/guides/write-a-provider.md)
 
 ### If You Maintain The Host
 

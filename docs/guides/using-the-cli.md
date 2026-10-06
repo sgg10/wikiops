@@ -132,6 +132,14 @@ Current output sections:
 
 The `ChangeSet` is printed as JSON. The diff is printed as text.
 
+### Provider Target Note
+
+When the selected provider can describe where it reads and writes, the host adds a note with code `provider_target` as the first entry of `ChangeSet.notes`, before any note emitted by the plugin. Its message has the form `Provider '<provider name>' (<provider id>) target: <description>`. The note appears in plan mode and again in apply mode, because `--apply` plans first. Providers that cannot describe their target, such as `azure_devops_wiki`, add no note. The `local_files` provider does describe its target (resolved root, working directory, and assets directory); see [`../reference/local-files.md`](../reference/local-files.md).
+
+Read this note before running with `--apply`, especially when a provider is configured with a relative path: the description shows the resolved location and the working directory used to resolve it.
+
+If a provider supports the hook but fails while describing its target, the plan still succeeds. No `provider_target` note is added and the host appends a warning with code `provider_target_unavailable` to `ChangeSet.warnings` instead. Its message names the provider and the exception, for example `Provider 'local' (local_files) could not describe its target (<ExceptionType>: <text>).`, and its details carry `provider`, `provider_id`, and `error_type`. Treat that warning as a sign that the target cannot be confirmed before `--apply`.
+
 ## Apply Mode
 
 With `--apply`, the host also persists changes through the selected provider.

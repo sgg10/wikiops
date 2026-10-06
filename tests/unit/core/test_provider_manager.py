@@ -6,7 +6,7 @@ import pytest
 from pydantic import Field
 
 from wikiops.core.exceptions import ConfigurationError
-from wikiops.core.provider_manager import ProviderManager
+from wikiops.core.provider_manager import ProviderManager, TargetDescribingProvider
 from wikiops_sdk.compat import ProviderAPIIncompatibleError
 from wikiops_sdk.contracts import ProviderSettings
 from wikiops_sdk.domain import (
@@ -321,3 +321,22 @@ def test_load_is_idempotent(
     manager.load()
 
     assert calls["count"] == 1
+
+
+class TargetDescribingDemoProvider(DemoProvider):
+    def describe_target(self) -> str:
+        return "root='/srv/wiki'"
+
+
+def test_target_describing_protocol_matches_providers_with_describe_target() -> None:
+    provider = TargetDescribingDemoProvider(DemoProviderSettings(provider_name="demo"))
+
+    assert isinstance(provider, TargetDescribingProvider)
+    assert provider.describe_target() == "root='/srv/wiki'"
+
+
+def test_target_describing_protocol_rejects_providers_without_describe_target() -> None:
+    provider = DemoProvider(DemoProviderSettings(provider_name="demo"))
+
+    assert not isinstance(provider, TargetDescribingProvider)
+    assert not isinstance(object(), TargetDescribingProvider)

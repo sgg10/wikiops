@@ -11,6 +11,7 @@ from wikiops_sdk.domain import (
     CreateDocumentOperation,
     ExecutionContext,
     LocalFileAssetSource,
+    NoteMessage,
     PluginResourceAssetSource,
     PutAssetOperation,
     ProviderCapability,
@@ -24,7 +25,7 @@ from wikiops.core.diff_engine import DiffEngine
 from wikiops.core.apply_engine import ApplyEngine
 from wikiops.core.plugin_manager import PluginManager
 from wikiops.core.document_loader import DocumentLoader
-from wikiops.core.provider_manager import ProviderManager
+from wikiops.core.provider_manager import ProviderManager, TargetDescribingProvider
 from wikiops.core.reference_resolver import ReferenceResolver
 from wikiops.core.config_loader import AppConfig, ConfigLoader
 from wikiops.core.exceptions import ConfigurationError, ProviderCompatibilityError
@@ -139,6 +140,9 @@ class DefaultDocumentationOrchestrator:
             planned_change_set,
         )
         self._append_asset_policy_warnings(ctx, planned_change_set)
+        self._prepend_provider_target_note(
+            profile.provider, provider, planned_change_set
+        )
 
         return config, ctx, planned_change_set
 
@@ -301,6 +305,44 @@ class DefaultDocumentationOrchestrator:
         if isinstance(operation, CreateChildDocumentOperation):
             return operation.child_content
         return None
+
+    @staticmethod
+    def _prepend_provider_target_note(
+        provider_name: str, provider, change_set: ChangeSet
+    ) -> None:
+        if not isinstance(provider, TargetDescribingProvider):
+            return
+
+        try:
+            target = provider.describe_target()
+        except Exception as exc:
+            # The note is informational: a failing hook must never abort the plan.
+            change_set.warnings.append(
+                WarningMessage(
+                    code="provider_target_unavailable",
+                    message=(
+                        f"Provider '{provider_name}' ({provider.provider_id}) "
+                        f"could not describe its target ({type(exc).__name__}: {exc})."
+                    ),
+                    details={
+                        "provider": provider_name,
+                        "provider_id": provider.provider_id,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+            )
+            return
+
+        change_set.notes.insert(
+            0,
+            NoteMessage(
+                code="provider_target",
+                message=(
+                    f"Provider '{provider_name}' ({provider.provider_id}) "
+                    f"target: {target}"
+                ),
+            ),
+        )
 
     @staticmethod
     def _append_asset_policy_warnings(

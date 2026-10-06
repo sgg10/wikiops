@@ -32,6 +32,14 @@
     "should_trigger": true
   },
   {
+    "query": "Configura wikiops con el provider local_files para que escriba las páginas como archivos Markdown en ./docs",
+    "should_trigger": true
+  },
+  {
+    "query": "wikiops apply failed with [local_files:conflict.exists]; help me understand what to do before I rerun it",
+    "should_trigger": true
+  },
+  {
     "query": "Necesito diseñar el contrato DocumentProvider del SDK",
     "should_trigger": false
   },

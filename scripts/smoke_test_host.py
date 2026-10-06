@@ -11,7 +11,7 @@ from importlib import import_module
 from importlib.metadata import distribution, entry_points, version as distribution_version
 
 
-EXPECTED_PROVIDER_ENTRYPOINT = "azure_devops_wiki"
+EXPECTED_PROVIDER_ENTRYPOINTS = ("azure_devops_wiki", "local_files")
 
 
 def parse_args() -> argparse.Namespace:
@@ -42,16 +42,19 @@ def assert_imports() -> None:
     wikiops = import_module("wikiops")
     cli_app = import_module("wikiops.cli.app")
     provider_module = import_module("wikiops.providers.azure_devops")
+    local_files_module = import_module("wikiops.providers.local_files")
 
     assert hasattr(wikiops, "__version__")
     assert cli_app.app is not None
     assert hasattr(provider_module, "AzureDevOpsWikiProviderFactory")
+    assert hasattr(local_files_module, "LocalFilesProviderFactory")
 
 
 def assert_entry_points() -> None:
     provider_groups = entry_points(group="wikiops.providers")
     names = {entry_point.name for entry_point in provider_groups}
-    assert EXPECTED_PROVIDER_ENTRYPOINT in names
+    missing = set(EXPECTED_PROVIDER_ENTRYPOINTS) - names
+    assert not missing, f"Missing provider entry points: {sorted(missing)}"
 
 
 def run_cli(*args: str) -> subprocess.CompletedProcess[str]:
@@ -77,7 +80,8 @@ def assert_cli_behavior() -> None:
     providers_result = run_cli("providers")
     if providers_result.returncode != 0:
         raise RuntimeError(providers_result.stderr or providers_result.stdout)
-    assert EXPECTED_PROVIDER_ENTRYPOINT in providers_result.stdout
+    for provider_id in EXPECTED_PROVIDER_ENTRYPOINTS:
+        assert provider_id in providers_result.stdout
 
     plugins_result = run_cli("plugins")
     if plugins_result.returncode != 0:

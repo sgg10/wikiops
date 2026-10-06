@@ -109,9 +109,15 @@ src/wikiops/
     provider_manager.py
     reference_resolver.py
   providers/
+    _fs.py
     azure_devops/
       provider.py
+    local_files/
+      _layout.py
+      provider.py
 ```
+
+`providers/_fs.py` holds the provider-agnostic filesystem safety helpers used by `local_files`; it is internal and not an extension API.
 
 ## High-Level Execution Model
 
@@ -159,7 +165,7 @@ This keeps the execution flow easy to reason about and easy to test.
 
 The current host is intentionally focused:
 
-- it ships one built-in provider, Azure DevOps Wiki
+- it ships two built-in providers, Azure DevOps Wiki and local Markdown files
 - it does not ship built-in plugins
 - configuration is YAML-based
 - preview diffs are strongest for update operations

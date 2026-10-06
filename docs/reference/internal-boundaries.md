@@ -26,6 +26,8 @@ The following behaviors are stable enough to rely on as current host behavior:
 - plan versus apply behavior in the CLI
 - host-managed asset upload orchestration and `asset://...` reference rewriting
 - built-in Azure DevOps provider settings, capabilities, and path-based ref behavior
+- built-in `local_files` provider settings, capabilities, root-relative path refs, conflict policy, and `[local_files:<code>]` error codes
+- the `provider_target` note and the `provider_target_unavailable` warning that the host emits for providers able to describe their target
 
 ## Host Conventions Rather Than SDK Guarantees
 
@@ -49,6 +51,7 @@ The following details should not be treated as public contracts:
 - exact normalization mechanics used when re-validating a planned `ChangeSet`
 - exact diff formatting text or heading strings beyond the CLI-level sections
 - exact provider recreation strategy between planning and apply
+- the private `wikiops.providers._fs` module (root resolution, path validation, symlink confinement, atomic writes) and `wikiops.providers.local_files._layout`; their function names, signatures, and the exact wording of error summaries and hints (the `[local_files:<code>]` codes themselves are stable)
 
 These details may change without changing the intended host behavior.
 
@@ -71,6 +74,7 @@ In particular, tests currently reinforce:
 - provider factory validation behavior
 - orchestrator flow and failure cases
 - built-in Azure DevOps provider behavior
+- built-in `local_files` provider behavior
 
 That does not make every test-backed implementation detail a public API, but it does make the tests useful evidence when clarifying current runtime semantics.
 
@@ -79,3 +83,4 @@ That does not make every test-backed implementation detail a public API, but it 
 - [`../sdk-relationship.md`](../sdk-relationship.md)
 - [`../architecture.md`](../architecture.md)
 - [`core-modules.md`](core-modules.md)
+- [`local-files.md`](local-files.md)

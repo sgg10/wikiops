@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Protocol, Type
+from typing import Any, Dict, List, Protocol, Type, runtime_checkable
 from importlib.metadata import entry_points
 
 from wikiops.core.exceptions import ConfigurationError
@@ -14,6 +14,18 @@ class ProviderFactory(Protocol):
     settings_model: Type[ProviderSettings]
 
     def create(self, settings: Any) -> DocumentProvider: ...
+
+
+@runtime_checkable
+class TargetDescribingProvider(Protocol):
+    """Optional host-local contract for providers that can describe their target.
+
+    Not part of the SDK ``DocumentProvider`` contract: the orchestrator surfaces
+    the returned text as a ``provider_target`` note so users can see where a
+    provider will read and write before applying anything.
+    """
+
+    def describe_target(self) -> str: ...
 
 
 class ProviderManager:
