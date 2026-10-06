@@ -132,6 +132,12 @@ Current output sections:
 
 The `ChangeSet` is printed as JSON. The diff is printed as text.
 
+### Provider Target Note
+
+When the selected provider can describe where it reads and writes, the host adds a note with code `provider_target` as the first entry of `ChangeSet.notes`, before any note emitted by the plugin. Its message has the form `Provider '<provider name>' (<provider id>) target: <description>`. The note appears in plan mode and again in apply mode, because `--apply` plans first. Providers that cannot describe their target, such as `azure_devops_wiki`, add no note.
+
+Read this note before running with `--apply`, especially when a provider is configured with a relative path: the description shows the resolved location and the working directory used to resolve it.
+
 ## Apply Mode
 
 With `--apply`, the host also persists changes through the selected provider.

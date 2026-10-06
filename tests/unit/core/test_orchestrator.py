@@ -16,6 +16,7 @@ from wikiops_sdk.domain import (
     ChangeSet,
     Document,
     DocumentRef,
+    NoteMessage,
     OperationStatus,
     PluginResourceAssetSource,
     PutAssetOperation,
@@ -229,6 +230,31 @@ class DemoProvider:
 
     def apply_changes(self, changeset: ChangeSet) -> ApplyResult:
         return ApplyResult(provider_name="default")
+
+
+class TargetDescribingDemoProvider(DemoProvider):
+    """Provider that opts into the host-local ``describe_target`` hook."""
+
+    def __init__(self, *args, target: str = "root='/srv/wiki'", **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.target = target
+
+    def describe_target(self) -> str:
+        return self.target
+
+
+class NotePlugin(RecordingPlugin):
+    """Plugin that emits its own notes, which must stay after ``provider_target``."""
+
+    def plan(self, ctx):
+        change_set = super().plan(ctx)
+        change_set.notes.extend(
+            [
+                NoteMessage(code="plugin_note_a", message="first plugin note"),
+                NoteMessage(code="plugin_note_b", message="second plugin note"),
+            ]
+        )
+        return change_set
 
 
 def _build_config(ref: DocumentRef, plugins: dict[str, dict[str, object]]) -> AppConfig:
@@ -711,3 +737,141 @@ def test_apply_from_file_reuses_plan_and_applies_changes(
     )
 
     assert result == (change_set, apply_result, "diff")
+
+
+def _wire_orchestrator(
+    provider,
+    plugin: RecordingPlugin,
+    document_factory,
+) -> DefaultDocumentationOrchestrator:
+    orchestrator = DefaultDocumentationOrchestrator()
+    orchestrator.provider_manager = SimpleNamespace(create=lambda *_args: provider)
+    orchestrator.plugin_manager = SimpleNamespace(get=lambda _plugin_id: plugin)
+    orchestrator.reference_resolver = SimpleNamespace(
+        resolve_alias=lambda profile, alias: profile.refs[alias]
+    )
+    orchestrator.document_loader = SimpleNamespace(
+        load=lambda _provider, refs: {
+            "inventory": document_factory(ref=refs["inventory"])
+        }
+    )
+    return orchestrator
+
+
+def test_plan_internal_prepends_provider_target_note(
+    doc_ref_factory,
+    document_factory,
+) -> None:
+    ref = doc_ref_factory(provider="default", path="/inventory")
+    provider = TargetDescribingDemoProvider(
+        {ProviderCapability.READ_DOCUMENT},
+        document_factory(ref=ref),
+        target="root='/work/repo/docs' cwd='/work/repo'",
+    )
+    plugin = RecordingPlugin()
+    orchestrator = _wire_orchestrator(provider, plugin, document_factory)
+
+    _, _, change_set = orchestrator._plan_internal(
+        _build_config(ref, {}),
+        "default",
+        plugin.manifest.plugin_id,
+        {"title": "Example"},
+    )
+
+    assert [note.code for note in change_set.notes] == ["provider_target"]
+    assert change_set.notes[0].message == (
+        "Provider 'default' (demo-provider) target: "
+        "root='/work/repo/docs' cwd='/work/repo'"
+    )
+
+
+def test_plan_internal_keeps_plugin_notes_after_provider_target(
+    doc_ref_factory,
+    document_factory,
+) -> None:
+    ref = doc_ref_factory(provider="default", path="/inventory")
+    provider = TargetDescribingDemoProvider(
+        {ProviderCapability.READ_DOCUMENT},
+        document_factory(ref=ref),
+    )
+    plugin = NotePlugin()
+    orchestrator = _wire_orchestrator(provider, plugin, document_factory)
+
+    _, _, change_set = orchestrator._plan_internal(
+        _build_config(ref, {}),
+        "default",
+        plugin.manifest.plugin_id,
+        {"title": "Example"},
+    )
+
+    assert [note.code for note in change_set.notes] == [
+        "provider_target",
+        "plugin_note_a",
+        "plugin_note_b",
+    ]
+    assert change_set.notes[1].message == "first plugin note"
+
+
+def test_plan_internal_adds_no_note_for_provider_without_describe_target(
+    doc_ref_factory,
+    document_factory,
+) -> None:
+    ref = doc_ref_factory(provider="default", path="/inventory")
+    provider = DemoProvider(
+        {ProviderCapability.READ_DOCUMENT},
+        document_factory(ref=ref),
+    )
+    plugin = NotePlugin()
+    orchestrator = _wire_orchestrator(provider, plugin, document_factory)
+
+    _, _, change_set = orchestrator._plan_internal(
+        _build_config(ref, {}),
+        "default",
+        plugin.manifest.plugin_id,
+        {"title": "Example"},
+    )
+
+    assert [note.code for note in change_set.notes] == [
+        "plugin_note_a",
+        "plugin_note_b",
+    ]
+
+
+def test_apply_from_file_applies_change_set_carrying_provider_target_note(
+    doc_ref_factory,
+    document_factory,
+    apply_result_factory,
+) -> None:
+    ref = doc_ref_factory(provider="default", path="/inventory")
+    provider = TargetDescribingDemoProvider(
+        {ProviderCapability.READ_DOCUMENT},
+        document_factory(ref=ref),
+        target="root='/srv/wiki'",
+    )
+    plugin = NotePlugin()
+    plugin.resources = None
+    orchestrator = _wire_orchestrator(provider, plugin, document_factory)
+    orchestrator.config_loader = SimpleNamespace(
+        load=lambda _path: _build_config(ref, {})
+    )
+    applied: list[ChangeSet] = []
+
+    def _apply(candidate, planned, execution_ctx, resources):
+        applied.append(planned)
+        return apply_result_factory(statuses=[OperationStatus.APPLIED])
+
+    orchestrator.apply_engine = SimpleNamespace(apply=_apply)
+
+    change_set, _, _ = orchestrator.apply_from_file(
+        "config.yaml",
+        "default",
+        plugin.manifest.plugin_id,
+        {"title": "Example"},
+    )
+
+    expected = [note.code for note in change_set.notes]
+    assert expected == ["provider_target", "plugin_note_a", "plugin_note_b"]
+    assert change_set.notes[0].message == (
+        "Provider 'default' (demo-provider) target: root='/srv/wiki'"
+    )
+    assert applied == [change_set]
