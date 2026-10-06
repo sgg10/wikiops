@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import posixpath
 import re
+from collections.abc import Iterable
+from urllib.parse import quote, unquote
 
 from wikiops.providers._fs import FsError
 
@@ -110,3 +112,41 @@ def default_document_path(*, title: str, parent_path: str | None) -> str:
     if parent_stem.lower() in _INDEX_STEMS:
         return posixpath.join(parent_dir, filename)
     return posixpath.join(parent_dir, parent_stem, filename)
+
+
+# Positions after an issued reference that end it: the destination closes, a
+# title or attribute follows, or a fragment / query string starts.
+_MARKDOWN_DESTINATION_END = r"(?=[)\s#?])"
+_HTML_VALUE_END = r"(?=[\"'#?])"
+
+
+def _relative_link(issued: str, target_rel: str) -> str:
+    """Return the document-relative, percent-encoded link for an issued reference."""
+    asset_rel = unquote(issued.removeprefix("/"))
+    start = posixpath.dirname(target_rel) or "."
+    return quote(posixpath.relpath(asset_rel, start), safe="/")
+
+
+def relativize_issued_links(
+    content: str, issued: Iterable[str], target_rel: str
+) -> str:
+    """Rewrite the asset references this provider issued into relative links.
+
+    ``issued`` holds root-anchored references such as ``/assets/x--h.png``; each
+    one is replaced, in Markdown link destinations and in quoted HTML ``src`` /
+    ``href`` values, by the link from the directory of ``target_rel`` to the
+    asset. A following ``#fragment`` or ``?query`` is preserved. Anything that
+    was not issued, including user-authored ``/assets/...`` links, is left
+    untouched. Pure function, no filesystem access.
+    """
+    for reference in set(issued):
+        link = _relative_link(reference, target_rel)
+        escaped = re.escape(reference)
+        markdown = re.compile(rf"(?P<prefix>\]\(){escaped}{_MARKDOWN_DESTINATION_END}")
+        html = re.compile(
+            rf"(?P<prefix>\b(?:src|href)\s*=\s*[\"']){escaped}{_HTML_VALUE_END}",
+            re.IGNORECASE,
+        )
+        content = markdown.sub(lambda match: f"{match.group('prefix')}{link}", content)
+        content = html.sub(lambda match: f"{match.group('prefix')}{link}", content)
+    return content

@@ -1,9 +1,10 @@
 """``local_files`` provider: Markdown documents under a configured root directory.
 
-Read side: settings, ref resolution, existence checks, document reads, links and
-the host ``describe_target`` hook. Every filesystem decision goes through the
-provider-agnostic ``wikiops.providers._fs`` helpers, whose un-namespaced
-``FsError`` instances are namespaced here, at the provider boundary.
+Settings, ref resolution, existence checks, document reads and writes, asset
+storage with document-relative links, and the host ``describe_target`` hook.
+Every filesystem decision goes through the provider-agnostic
+``wikiops.providers._fs`` helpers, whose un-namespaced ``FsError`` instances are
+namespaced here, at the provider boundary.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ import contextlib
 from collections.abc import Iterator
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Optional
+from urllib.parse import quote
 
 from pydantic import ConfigDict, Field
 
@@ -19,6 +21,7 @@ from wikiops.providers import _fs
 from wikiops.providers._fs import FsError
 from wikiops.providers.local_files._layout import (
     default_document_path,
+    relativize_issued_links,
     require_markdown_path,
 )
 from wikiops_sdk.contracts import ProviderSettings
@@ -26,6 +29,7 @@ from wikiops_sdk.domain import (
     AppliedOperationResult,
     Asset,
     AssetRef,
+    AssetRefKind,
     ApplyResult,
     ChangeSet,
     CreateChildDocumentOperation,
@@ -44,7 +48,7 @@ from wikiops_sdk.domain import (
 ERROR_NAMESPACE = "local_files"
 
 _PATH_REFS_HINT = "set locator.path to a root-relative POSIX path such as 'docs/a.md'"
-_WRITE_SIDE_PENDING = "local_files write operations are not implemented yet"
+_DEFAULT_MEDIA_TYPE = "application/octet-stream"
 _CreateOperation = CreateDocumentOperation | CreateChildDocumentOperation
 _TOKEN_PREFIX = len("sha256:") + 12
 
@@ -103,6 +107,7 @@ class LocalFilesProvider:
         self._root_real: Path | None = None
         self._cwd: Path | None = None
         self._assets_real: Path | None = None
+        self._issued_asset_links: set[str] = set()
 
     # -- resolved settings -------------------------------------------------
 
@@ -135,8 +140,14 @@ class LocalFilesProvider:
         return {
             ProviderCapability.READ_DOCUMENT,
             ProviderCapability.CHECK_EXISTS,
+            ProviderCapability.CREATE_DOCUMENT,
+            ProviderCapability.UPDATE_DOCUMENT,
+            ProviderCapability.CREATE_CHILD_DOCUMENT,
             ProviderCapability.BUILD_LINK,
+            ProviderCapability.PUT_ASSET,
             ProviderCapability.RESOLVE_BY_PATH,
+            ProviderCapability.HIERARCHICAL_PAGES,
+            ProviderCapability.VERSION_CHECK,
         }
 
     def validate_settings(self) -> None:
@@ -210,10 +221,68 @@ class LocalFilesProvider:
         return real.as_uri()
 
     def put_asset(self, operation: PutAssetOperation, content: bytes) -> Asset:
-        raise NotImplementedError(_WRITE_SIDE_PENDING)
+        """Store ``content`` under a content-hashed name inside ``assets_dir``.
+
+        Identical bytes already stored are not rewritten; different bytes at the
+        hashed name are refused instead of being reused.
+        """
+        root_real = self._ensure_resolved()
+        with _namespaced():
+            name = _fs.hashed_asset_name(operation.name, content)
+        relative = str(PurePosixPath(self.settings.assets_dir) / name)
+        with _namespaced():
+            real = _fs.resolve_within_root(root_real, relative)
+        existing = self._read_existing(relative, real)
+        if existing is None:
+            self._write(real, content, root_real)
+        elif existing != content:
+            raise _error(
+                "conflict.asset_mismatch",
+                "An asset with this hashed name already exists with different content",
+                path=relative,
+                root=root_real,
+                hint="delete or rename the stored file, then upload the asset again",
+            )
+        version = _fs.content_version(content)
+        return Asset(
+            ref=AssetRef(
+                provider=self.settings.provider_name,
+                kind=AssetRefKind.PATH,
+                locator={"path": relative},
+            ),
+            name=name,
+            media_type=operation.media_type or _DEFAULT_MEDIA_TYPE,
+            size_bytes=len(content),
+            version=DocumentVersion(token=version, etag=version),
+            metadata={
+                "path": relative,
+                "absolute_path": str(real),
+                "unchanged": existing is not None,
+            },
+        )
 
     def build_asset_reference(self, ref: AssetRef) -> str:
-        raise NotImplementedError(_WRITE_SIDE_PENDING)
+        """Return the root-anchored reference for ``ref`` and remember it as issued.
+
+        ``apply_changes`` turns exactly the references issued here into links
+        relative to each document.
+        """
+        if ref.kind is not AssetRefKind.PATH:
+            raise _error(
+                "ref.unsupported_kind",
+                f"local_files requires path asset refs with locator.path (got kind '{ref.kind.value}')",
+                hint=_PATH_REFS_HINT,
+            )
+        path = ref.locator.get("path")
+        if not path:
+            raise _error(
+                "ref.missing_path",
+                "local_files requires path asset refs with locator.path (locator.path is missing)",
+                hint=_PATH_REFS_HINT,
+            )
+        reference = "/" + quote(path, safe="/")
+        self._issued_asset_links.add(reference)
+        return reference
 
     def apply_changes(self, changeset: ChangeSet) -> ApplyResult:
         """Apply operations one by one; a failure never stops the later operations."""
@@ -335,7 +404,7 @@ class LocalFilesProvider:
         )
         relative, real = self._locate(ref)
         root_real = self._ensure_resolved()
-        data = self._encode(content, relative, root_real)
+        data = self._encode(self._relativize(content, relative), relative, root_real)
         existing = self._read_existing(relative, real)
         if existing is None:
             self._write(real, data, root_real)
@@ -374,7 +443,9 @@ class LocalFilesProvider:
         """Update in order: validate, missing, identical, version, write."""
         relative, real = self._locate(operation.ref)
         root_real = self._ensure_resolved()
-        data = self._encode(operation.new_content, relative, root_real)
+        data = self._encode(
+            self._relativize(operation.new_content, relative), relative, root_real
+        )
         existing = self._read_existing(relative, real)
         if existing is None:
             raise _error(
@@ -405,6 +476,10 @@ class LocalFilesProvider:
             ref=operation.ref,
             data=data,
         )
+
+    def _relativize(self, content: str, relative: str) -> str:
+        """Turn the asset references issued by this provider into links relative to ``relative``."""
+        return relativize_issued_links(content, self._issued_asset_links, relative)
 
     @staticmethod
     def _encode(content: str, relative: str, root_real: Path) -> bytes:

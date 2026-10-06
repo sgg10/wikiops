@@ -35,6 +35,7 @@ wikiops = "wikiops.cli.app:app"
 
 [project.entry-points."wikiops.providers"]
 azure_devops_wiki = "wikiops.providers.azure_devops:AzureDevOpsWikiProviderFactory"
+local_files = "wikiops.providers.local_files:LocalFilesProviderFactory"
 
 [tool.poetry]
 packages = [

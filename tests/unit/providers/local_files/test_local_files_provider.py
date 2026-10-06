@@ -21,6 +21,7 @@ from wikiops.providers.local_files.provider import (
     LocalFilesProviderSettings,
     _namespaced,
 )
+from wikiops.core.apply_engine import ApplyEngine
 from wikiops_sdk.contracts import DocumentProvider
 from wikiops_sdk.domain import (
     AppliedOperationResult,
@@ -32,7 +33,9 @@ from wikiops_sdk.domain import (
     CreateDocumentOperation,
     DocumentRef,
     DocumentVersion,
+    ExecutionContext,
     OperationStatus,
+    PluginResourceAssetSource,
     ProviderCapability,
     PutAssetOperation,
     RefKind,
@@ -751,28 +754,23 @@ def test_describe_target_resolves_the_root_once_per_provider(
     assert f"cwd='{root}'" in provider.describe_target()
 
 
-def test_capabilities_expose_only_the_implemented_read_side(root: Path) -> None:
+def test_capabilities_advertise_the_full_local_files_set(root: Path) -> None:
     assert _provider(root).capabilities() == {
         ProviderCapability.READ_DOCUMENT,
         ProviderCapability.CHECK_EXISTS,
+        ProviderCapability.CREATE_DOCUMENT,
+        ProviderCapability.UPDATE_DOCUMENT,
+        ProviderCapability.CREATE_CHILD_DOCUMENT,
         ProviderCapability.BUILD_LINK,
+        ProviderCapability.PUT_ASSET,
         ProviderCapability.RESOLVE_BY_PATH,
+        ProviderCapability.HIERARCHICAL_PAGES,
+        ProviderCapability.VERSION_CHECK,
     }
 
 
-def test_asset_side_is_not_implemented_yet(root: Path) -> None:
-    provider = _provider(root)
-    asset_ref = AssetRef(
-        provider=PROVIDER_NAME, kind=AssetRefKind.PATH, locator={"path": "a.png"}
-    )
-
-    with pytest.raises(NotImplementedError):
-        provider.build_asset_reference(asset_ref)
-    with pytest.raises(NotImplementedError):
-        provider.put_asset(
-            PutAssetOperation.model_construct(name="a.png"),
-            b"x",
-        )
+def test_capabilities_do_not_advertise_id_resolution(root: Path) -> None:
+    assert ProviderCapability.RESOLVE_BY_ID not in _provider(root).capabilities()
 
 
 # ---------------------------------------------------------------------------
@@ -1732,3 +1730,503 @@ def test_a_root_level_title_ending_in_mixed_case_md_keeps_its_suffix(
 
     assert result.status is OperationStatus.APPLIED
     assert (root / "Notes.Md").read_bytes() == b"body"
+
+
+# ---------------------------------------------------------------------------
+# put_asset and build_asset_reference (LF-11, LF-12)
+# ---------------------------------------------------------------------------
+
+_HASHED_PNG = re.compile(r"^assets/diagram--[0-9a-f]{16}\.png$")
+
+
+def _put_operation(name: str | None = "diagram.png", **fields: Any) -> PutAssetOperation:
+    return PutAssetOperation(
+        asset_key="diagram",
+        source=PluginResourceAssetSource(relative_path="diagram.png"),
+        name=name,
+        **fields,
+    )
+
+
+def _asset_path(asset) -> str:
+    return asset.ref.locator["path"]
+
+
+def test_put_asset_stores_the_bytes_under_a_hashed_name(root: Path) -> None:
+    provider = _provider(root)
+
+    asset = provider.put_asset(_put_operation(), b"abc")
+
+    path = _asset_path(asset)
+    assert _HASHED_PNG.match(path)
+    assert (root / path).read_bytes() == b"abc"
+    assert asset.ref.provider == PROVIDER_NAME
+    assert asset.ref.kind is AssetRefKind.PATH
+    assert asset.metadata["unchanged"] is False
+
+
+def test_put_asset_describes_the_stored_asset(root: Path) -> None:
+    asset = _provider(root).put_asset(_put_operation(), b"abc")
+
+    path = _asset_path(asset)
+    assert asset.name == path.rsplit("/", 1)[1]
+    assert asset.media_type == "application/octet-stream"
+    assert asset.size_bytes == 3
+    assert asset.version == DocumentVersion(token=_sha(b"abc"), etag=_sha(b"abc"))
+    assert asset.metadata["path"] == path
+    assert asset.metadata["absolute_path"] == str(root / path)
+
+
+def test_put_asset_keeps_the_declared_media_type(root: Path) -> None:
+    asset = _provider(root).put_asset(_put_operation(media_type="image/png"), b"abc")
+
+    assert asset.media_type == "image/png"
+
+
+def test_put_asset_names_depend_on_the_bytes(root: Path) -> None:
+    provider = _provider(root)
+
+    first = provider.put_asset(_put_operation(), b"abc")
+    second = provider.put_asset(_put_operation(), b"abd")
+
+    assert _asset_path(first) != _asset_path(second)
+    assert sorted(path.name for path in (root / "assets").iterdir()) == sorted(
+        [_asset_path(first).split("/")[1], _asset_path(second).split("/")[1]]
+    )
+
+
+def test_put_asset_is_idempotent_and_does_not_rewrite_the_file(root: Path) -> None:
+    provider = _provider(root)
+    first = provider.put_asset(_put_operation(), b"abc")
+    stored = root / _asset_path(first)
+    os.utime(stored, ns=(1_000_000_000, 1_000_000_000))
+    before = stored.stat().st_mtime_ns
+
+    again = provider.put_asset(_put_operation(), b"abc")
+
+    assert _asset_path(again) == _asset_path(first)
+    assert again.metadata["unchanged"] is True
+    assert stored.stat().st_mtime_ns == before
+    assert stored.read_bytes() == b"abc"
+
+
+def test_put_asset_refuses_to_reuse_a_file_with_different_bytes(root: Path) -> None:
+    provider = _provider(root)
+    stored = root / _asset_path(provider.put_asset(_put_operation(), b"abc"))
+    stored.write_bytes(b"tampered")
+
+    with pytest.raises(FsError) as excinfo:
+        provider.put_asset(_put_operation(), b"abc")
+
+    message = str(excinfo.value)
+    assert message.startswith("[local_files:conflict.asset_mismatch]")
+    assert f"path='{_asset_path_of(stored, root)}'" in message
+    assert "Hint:" in message
+    assert stored.read_bytes() == b"tampered"
+
+
+def _asset_path_of(stored: Path, root: Path) -> str:
+    return stored.relative_to(root).as_posix()
+
+
+def test_put_asset_without_a_name_is_reported_with_the_namespace(root: Path) -> None:
+    with pytest.raises(FsError) as excinfo:
+        _provider(root).put_asset(_put_operation(name=None), b"abc")
+
+    message = str(excinfo.value)
+    assert message.startswith("[local_files:asset.missing_name]")
+    assert "Hint:" in message
+    assert _tree(root) == []
+
+
+@pytest.mark.parametrize("name", ["../x.png", "a/b.png", "a\\b.png", "x..png"])
+def test_put_asset_with_an_invalid_name_is_reported_with_the_namespace(
+    root: Path, name: str
+) -> None:
+    with pytest.raises(FsError) as excinfo:
+        _provider(root).put_asset(_put_operation(name=name), b"abc")
+
+    message = str(excinfo.value)
+    assert message.startswith("[local_files:asset.invalid_name]")
+    assert "Hint:" in message
+    assert _tree(root) == []
+
+
+def test_put_asset_honours_a_custom_assets_dir(root: Path) -> None:
+    asset = _provider(root, assets_dir="docs/img").put_asset(_put_operation(), b"abc")
+
+    path = _asset_path(asset)
+    assert path.startswith("docs/img/diagram--")
+    assert (root / path).read_bytes() == b"abc"
+
+
+def test_put_asset_reports_a_file_in_the_way_of_the_assets_dir(root: Path) -> None:
+    _write(root, "assets", b"i am a file")
+
+    with pytest.raises(FsError) as excinfo:
+        _provider(root).put_asset(_put_operation(), b"abc")
+
+    message = str(excinfo.value)
+    assert message.startswith("[local_files:path.parent_not_directory]")
+    assert (root / "assets").read_bytes() == b"i am a file"
+
+
+def test_put_asset_reports_a_directory_at_the_hashed_target(root: Path) -> None:
+    provider = _provider(root)
+    stored = provider.put_asset(_put_operation(), b"abc")
+    target = root / _asset_path(stored)
+    target.unlink()
+    target.mkdir()
+
+    with pytest.raises(FsError) as excinfo:
+        provider.put_asset(_put_operation(), b"abc")
+
+    assert str(excinfo.value).startswith("[local_files:path.not_a_file]")
+
+
+def test_put_asset_refuses_a_target_that_is_a_symlink_to_the_outside(
+    root: Path, tmp_path: Path, make_symlink
+) -> None:
+    provider = _provider(root)
+    stored = provider.put_asset(_put_operation(), b"abc")
+    target = root / _asset_path(stored)
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"secret")
+    target.unlink()
+    make_symlink(target, outside)
+
+    with pytest.raises(FsError) as excinfo:
+        provider.put_asset(_put_operation(), b"abc")
+
+    assert str(excinfo.value).startswith("[local_files:path.symlink_escape]")
+    assert outside.read_bytes() == b"secret"
+
+
+def test_build_asset_reference_is_root_anchored(root: Path) -> None:
+    asset_ref = AssetRef(
+        provider=PROVIDER_NAME,
+        kind=AssetRefKind.PATH,
+        locator={"path": "assets/diagram--abc123def4567890.png"},
+    )
+
+    assert (
+        _provider(root).build_asset_reference(asset_ref)
+        == "/assets/diagram--abc123def4567890.png"
+    )
+
+
+def test_build_asset_reference_percent_encodes_spaces_and_keeps_slashes(
+    root: Path,
+) -> None:
+    asset_ref = AssetRef(
+        provider=PROVIDER_NAME,
+        kind=AssetRefKind.PATH,
+        locator={"path": "my assets/My Diagram--abc123def4567890.png"},
+    )
+
+    assert (
+        _provider(root).build_asset_reference(asset_ref)
+        == "/my%20assets/My%20Diagram--abc123def4567890.png"
+    )
+
+
+@pytest.mark.parametrize(
+    ("ref", "code"),
+    [
+        (
+            AssetRef(provider=PROVIDER_NAME, kind=AssetRefKind.ID, locator={"id": "7"}),
+            "ref.unsupported_kind",
+        ),
+        (
+            AssetRef(provider=PROVIDER_NAME, kind=AssetRefKind.URL, locator={"url": "u"}),
+            "ref.unsupported_kind",
+        ),
+        (
+            AssetRef(provider=PROVIDER_NAME, kind=AssetRefKind.PATH, locator={}),
+            "ref.missing_path",
+        ),
+        (
+            AssetRef(provider=PROVIDER_NAME, kind=AssetRefKind.PATH, locator={"path": ""}),
+            "ref.missing_path",
+        ),
+    ],
+)
+def test_build_asset_reference_rejects_refs_without_a_path(
+    root: Path, ref: AssetRef, code: str
+) -> None:
+    with pytest.raises(FsError) as excinfo:
+        _provider(root).build_asset_reference(ref)
+
+    message = str(excinfo.value)
+    assert message.startswith(f"[local_files:{code}]")
+    assert "Hint:" in message
+
+
+# ---------------------------------------------------------------------------
+# apply_changes: document-relative links to issued assets (LF-12)
+# ---------------------------------------------------------------------------
+
+
+def _issue(provider: LocalFilesProvider, name: str = "x.png", data: bytes = b"abc") -> str:
+    """Store an asset and return the root-anchored reference the host would inline."""
+    asset = provider.put_asset(_put_operation(name=name), data)
+    return provider.build_asset_reference(asset.ref)
+
+
+def _written(root: Path, relative: str) -> str:
+    return (root / relative).read_text(encoding="utf-8")
+
+
+def test_create_at_a_nested_explicit_ref_gets_a_document_relative_link(
+    root: Path,
+) -> None:
+    provider = _provider(root)
+    link = _issue(provider)
+
+    result = _apply_one(
+        provider, _create(f"![x]({link})", ref=_ref("docs/guide/Setup.md"))
+    )
+
+    assert result.status is OperationStatus.APPLIED
+    assert _written(root, "docs/guide/Setup.md") == f"![x](../../{link[1:]})"
+
+
+def test_a_root_level_document_gets_a_link_without_parent_segments(
+    root: Path,
+) -> None:
+    provider = _provider(root)
+    link = _issue(provider)
+
+    _apply_one(provider, _create(f"![x]({link})", ref=_ref("README.md")))
+
+    assert _written(root, "README.md") == f"![x]({link[1:]})"
+
+
+def test_a_generated_root_target_gets_a_root_level_link(root: Path) -> None:
+    provider = _provider(root)
+    link = _issue(provider)
+
+    result = _apply_one(provider, _create(f"![x]({link})", title="Setup"))
+
+    assert result.resolved_ref is not None
+    assert result.resolved_ref.locator == {"path": "Setup.md"}
+    assert _written(root, "Setup.md") == f"![x]({link[1:]})"
+
+
+def test_a_derived_child_target_gets_its_own_depth(root: Path) -> None:
+    provider = _provider(root)
+    link = _issue(provider)
+
+    _apply_one(provider, _child("docs/guide.md", f"![x]({link})", "Setup"))
+
+    assert _written(root, "docs/guide/Setup.md") == f"![x](../../{link[1:]})"
+
+
+def test_an_explicit_deep_child_ref_gets_its_own_depth(root: Path) -> None:
+    provider = _provider(root)
+    link = _issue(provider)
+    operation = CreateChildDocumentOperation(
+        parent_ref=_ref("docs/guide.md"),
+        child_title="Foo",
+        child_content=f"![x]({link})",
+        ref=_ref("docs/examples/deep/foo.md"),
+    )
+
+    _apply_one(provider, operation)
+
+    assert _written(root, "docs/examples/deep/foo.md") == f"![x](../../../{link[1:]})"
+
+
+def test_assets_inside_the_document_tree_get_a_sibling_link(root: Path) -> None:
+    provider = _provider(root, assets_dir="docs/assets")
+    link = _issue(provider)
+
+    _apply_one(provider, _create(f"![x]({link})", ref=_ref("docs/a.md")))
+
+    assert _written(root, "docs/a.md") == f"![x]({link.removeprefix('/docs/')})"
+
+
+def test_two_documents_at_two_depths_each_get_their_own_link(root: Path) -> None:
+    provider = _provider(root)
+    link = _issue(provider)
+
+    result = _apply(
+        provider,
+        _create(f"![x]({link})", ref=_ref("README.md")),
+        _create(f"![x]({link})", ref=_ref("docs/guide/Setup.md")),
+    )
+
+    assert [r.status for r in result.results] == [OperationStatus.APPLIED] * 2
+    assert _written(root, "README.md") == f"![x]({link[1:]})"
+    assert _written(root, "docs/guide/Setup.md") == f"![x](../../{link[1:]})"
+
+
+def test_html_and_fragment_forms_are_relativized(root: Path) -> None:
+    provider = _provider(root)
+    link = _issue(provider)
+    content = f'<img src="{link}"> [a]({link}#top)'
+
+    _apply_one(provider, _create(content, ref=_ref("docs/a.md")))
+
+    assert _written(root, "docs/a.md") == (
+        f'<img src="..{link}"> [a](..{link}#top)'
+    )
+
+
+def test_user_authored_links_are_left_untouched(root: Path) -> None:
+    provider = _provider(root)
+    link = _issue(provider)
+    content = f"![x]({link}) and [y](/assets/other.png)"
+
+    _apply_one(provider, _create(content, ref=_ref("docs/a.md")))
+
+    assert _written(root, "docs/a.md") == f"![x](..{link}) and [y](/assets/other.png)"
+
+
+def test_content_is_untouched_when_no_asset_was_issued(root: Path) -> None:
+    content = "![y](/assets/other.png)\r\n"
+
+    _apply_one(_provider(root), _create(content, ref=_ref("docs/a.md")))
+
+    assert (root / "docs/a.md").read_bytes() == content.encode("utf-8")
+
+
+def test_links_issued_by_another_provider_instance_are_not_rewritten(
+    root: Path,
+) -> None:
+    link = _issue(_provider(root))
+    content = f"![x]({link})"
+
+    _apply_one(_provider(root), _create(content, ref=_ref("docs/a.md")))
+
+    assert _written(root, "docs/a.md") == content
+
+
+def test_update_relativizes_and_reapplying_is_a_noop(root: Path) -> None:
+    _write(root, "docs/a.md", b"old")
+    provider = _provider(root)
+    link = _issue(provider)
+    operation = _update("docs/a.md", f"![x]({link})")
+
+    first = _apply_one(provider, operation)
+    second = _apply_one(provider, operation)
+
+    assert first.status is OperationStatus.APPLIED
+    assert _written(root, "docs/a.md") == f"![x](..{link})"
+    assert second.status is OperationStatus.SKIPPED
+    assert (second.message or "").startswith("[local_files:noop.unchanged]")
+
+
+def test_create_reapply_with_relativized_content_is_a_noop(root: Path) -> None:
+    provider = _provider(root)
+    link = _issue(provider)
+    operation = _create(f"![x]({link})", ref=_ref("docs/a.md"))
+
+    first = _apply_one(provider, operation)
+    second = _apply_one(provider, operation)
+
+    assert first.status is OperationStatus.APPLIED
+    assert second.status is OperationStatus.SKIPPED
+    assert (second.message or "").startswith("[local_files:noop.unchanged]")
+
+
+def test_the_resulting_version_describes_the_relativized_bytes(root: Path) -> None:
+    provider = _provider(root)
+    link = _issue(provider)
+
+    result = _apply_one(provider, _create(f"![x]({link})", ref=_ref("docs/a.md")))
+
+    written = (root / "docs/a.md").read_bytes()
+    assert result.resulting_version == DocumentVersion(
+        token=_sha(written), etag=_sha(written)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Asset failures through the ApplyEngine (LF-11, LF-12)
+# ---------------------------------------------------------------------------
+
+
+class _Resources:
+    """Plugin resource provider returning fixed bytes."""
+
+    def has(self, relative_path: str) -> bool:
+        return True
+
+    def read_text(self, relative_path: str, encoding: str = "utf-8") -> str:
+        return "abc"
+
+    def read_bytes(self, relative_path: str) -> bytes:
+        return b"abc"
+
+
+def _engine_context() -> ExecutionContext:
+    return ExecutionContext(
+        run_id="run", profile_name="default", provider_name=PROVIDER_NAME
+    )
+
+
+def test_the_apply_engine_skips_documents_when_an_asset_cannot_be_stored(
+    root: Path,
+) -> None:
+    _write(root, "assets", b"i am a file")
+    change_set = ChangeSet(
+        plugin_id="demo.plugin",
+        operations=[
+            _put_operation(),
+            _create("![x](asset://diagram)", ref=_ref("docs/a.md")),
+        ],
+    )
+
+    result = ApplyEngine().apply(
+        _provider(root), change_set, _engine_context(), _Resources()
+    )
+
+    assert [r.status for r in result.results] == [
+        OperationStatus.FAILED,
+        OperationStatus.SKIPPED,
+    ]
+    assert (result.results[0].message or "").startswith(
+        "[local_files:path.parent_not_directory]"
+    )
+    assert not (root / "docs").exists()
+
+
+def test_the_apply_engine_reports_asset_name_errors_with_the_namespace(
+    root: Path,
+) -> None:
+    operation = PutAssetOperation(
+        asset_key="diagram",
+        source=PluginResourceAssetSource(relative_path="diagram.png"),
+        name="../x.png",
+    )
+    change_set = ChangeSet(plugin_id="demo.plugin", operations=[operation])
+
+    result = ApplyEngine().apply(
+        _provider(root), change_set, _engine_context(), _Resources()
+    )
+
+    assert result.results[0].status is OperationStatus.FAILED
+    assert (result.results[0].message or "").startswith(
+        "[local_files:asset.invalid_name]"
+    )
+
+
+def test_the_apply_engine_stores_assets_and_writes_relative_links(root: Path) -> None:
+    change_set = ChangeSet(
+        plugin_id="demo.plugin",
+        operations=[
+            _put_operation(),
+            _create("![x](asset://diagram)", ref=_ref("docs/guide/Setup.md")),
+        ],
+    )
+
+    result = ApplyEngine().apply(
+        _provider(root), change_set, _engine_context(), _Resources()
+    )
+
+    assert [r.status for r in result.results] == [OperationStatus.APPLIED] * 2
+    stored = result.results[0].resolved_asset_ref.locator["path"]
+    assert _HASHED_PNG.match(stored)
+    assert result.results[0].resolved_asset_reference == f"/{stored}"
+    assert _written(root, "docs/guide/Setup.md") == f"![x](../../{stored})"

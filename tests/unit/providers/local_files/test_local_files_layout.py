@@ -8,6 +8,7 @@ from wikiops.providers._fs import FsError
 from wikiops.providers.local_files._layout import (
     default_document_path,
     filename_for_title,
+    relativize_issued_links,
     require_markdown_path,
 )
 
@@ -161,3 +162,134 @@ def test_default_document_path_propagates_invalid_titles() -> None:
         default_document_path(title="a/b", parent_path="docs/guide.md")
 
     assert excinfo.value.code == "title.invalid"
+
+
+# ---------------------------------------------------------------------------
+# Document-relative asset links (D5)
+# ---------------------------------------------------------------------------
+
+_ASSET = "/assets/x--h.png"
+
+
+@pytest.mark.parametrize(
+    ("issued", "target", "expected"),
+    [
+        ("/assets/x--h.png", "README.md", "assets/x--h.png"),
+        ("/assets/x--h.png", "docs/guide/Setup.md", "../../assets/x--h.png"),
+        ("/assets/x--h.png", "docs/a.md", "../assets/x--h.png"),
+        ("/docs/assets/x--h.png", "docs/a.md", "assets/x--h.png"),
+        ("/assets/x--h.png", "docs/examples/deep/foo.md", "../../../assets/x--h.png"),
+        ("/docs/img/x--h.png", "docs/guide/Setup.md", "../img/x--h.png"),
+    ],
+)
+def test_relativize_markdown_links_for_every_target_depth(
+    issued: str, target: str, expected: str
+) -> None:
+    content = f"before ![x]({issued}) after"
+
+    assert (
+        relativize_issued_links(content, [issued], target)
+        == f"before ![x]({expected}) after"
+    )
+
+
+@pytest.mark.parametrize(
+    ("link", "expected"),
+    [
+        (f"[a]({_ASSET}#top)", "[a](../assets/x--h.png#top)"),
+        (f"[a]({_ASSET}?raw=1)", "[a](../assets/x--h.png?raw=1)"),
+        (f"[a]({_ASSET}?raw=1#top)", "[a](../assets/x--h.png?raw=1#top)"),
+        (f'[a]({_ASSET} "A title")', '[a](../assets/x--h.png "A title")'),
+        (f"![x]({_ASSET})", "![x](../assets/x--h.png)"),
+    ],
+)
+def test_relativize_preserves_what_follows_a_markdown_destination(
+    link: str, expected: str
+) -> None:
+    assert relativize_issued_links(link, [_ASSET], "docs/a.md") == expected
+
+
+@pytest.mark.parametrize(
+    ("link", "expected"),
+    [
+        (f'<img src="{_ASSET}">', '<img src="../assets/x--h.png">'),
+        (f"<img src='{_ASSET}'>", "<img src='../assets/x--h.png'>"),
+        (f'<a href="{_ASSET}#top">', '<a href="../assets/x--h.png#top">'),
+        (f'<img SRC = "{_ASSET}?w=2">', '<img SRC = "../assets/x--h.png?w=2">'),
+    ],
+)
+def test_relativize_handles_quoted_html_attributes(link: str, expected: str) -> None:
+    assert relativize_issued_links(link, [_ASSET], "docs/a.md") == expected
+
+
+def test_relativize_rewrites_every_occurrence_of_every_issued_reference() -> None:
+    content = (
+        "![a](/assets/a--1.png) ![b](/assets/b--2.png) ![a](/assets/a--1.png)\n"
+        '<img src="/assets/b--2.png">'
+    )
+
+    result = relativize_issued_links(
+        content, ["/assets/a--1.png", "/assets/b--2.png"], "docs/guide/Setup.md"
+    )
+
+    assert result == (
+        "![a](../../assets/a--1.png) ![b](../../assets/b--2.png) "
+        "![a](../../assets/a--1.png)\n"
+        '<img src="../../assets/b--2.png">'
+    )
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "![y](/assets/other.png)",
+        "![y](/assets/x--h.png.bak)",
+        "![y](/assets/x--h.pngx)",
+        '<img src="/assets/other.png">',
+        "plain text mentioning /assets/x--h.png in prose",
+        "[x](other/assets/x--h.png)",
+    ],
+)
+def test_relativize_leaves_references_that_were_not_issued_untouched(
+    content: str,
+) -> None:
+    assert relativize_issued_links(content, [_ASSET], "docs/a.md") == content
+
+
+def test_relativize_only_touches_the_issued_link_in_mixed_content() -> None:
+    content = f"![x]({_ASSET}) and ![y](/assets/other.png)"
+
+    assert relativize_issued_links(content, [_ASSET], "docs/a.md") == (
+        "![x](../assets/x--h.png) and ![y](/assets/other.png)"
+    )
+
+
+@pytest.mark.parametrize("issued", [[], iter(())])
+def test_relativize_without_issued_assets_returns_the_content_identical(
+    issued,
+) -> None:
+    content = f"![x]({_ASSET})\r\n"
+
+    assert relativize_issued_links(content, issued, "docs/a.md") == content
+
+
+def test_relativize_percent_encodes_the_relative_link() -> None:
+    issued = "/my%20assets/My%20Diagram--h.png"
+
+    assert relativize_issued_links(
+        f"![x]({issued})", [issued], "docs/guide/Setup.md"
+    ) == "![x](../../my%20assets/My%20Diagram--h.png)"
+
+
+def test_relativize_does_not_double_encode_existing_percent_escapes() -> None:
+    issued = "/assets/caf%C3%A9--h.png"
+
+    assert relativize_issued_links(
+        f"![x]({issued})", [issued], "README.md"
+    ) == "![x](assets/caf%C3%A9--h.png)"
+
+
+def test_relativize_is_idempotent_on_already_relative_content() -> None:
+    once = relativize_issued_links(f"![x]({_ASSET})", [_ASSET], "docs/a.md")
+
+    assert relativize_issued_links(once, [_ASSET], "docs/a.md") == once
