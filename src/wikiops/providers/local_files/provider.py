@@ -333,9 +333,9 @@ class LocalFilesProvider:
             if isinstance(operation, CreateChildDocumentOperation)
             else operation.content
         )
-        data = content.encode("utf-8")
         relative, real = self._locate(ref)
         root_real = self._ensure_resolved()
+        data = self._encode(content, relative, root_real)
         existing = self._read_existing(relative, real)
         if existing is None:
             self._write(real, data, root_real)
@@ -374,7 +374,7 @@ class LocalFilesProvider:
         """Update in order: validate, missing, identical, version, write."""
         relative, real = self._locate(operation.ref)
         root_real = self._ensure_resolved()
-        data = operation.new_content.encode("utf-8")
+        data = self._encode(operation.new_content, relative, root_real)
         existing = self._read_existing(relative, real)
         if existing is None:
             raise _error(
@@ -405,6 +405,20 @@ class LocalFilesProvider:
             ref=operation.ref,
             data=data,
         )
+
+    @staticmethod
+    def _encode(content: str, relative: str, root_real: Path) -> bytes:
+        """Encode ``content`` as UTF-8, reporting unencodable text accurately."""
+        try:
+            return content.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise _error(
+                "document.encode_error",
+                f"Content is not valid UTF-8-encodable ({exc.reason} at character {exc.start})",
+                path=relative,
+                root=root_real,
+                hint="remove or replace unpaired surrogate characters in the content",
+            ) from exc
 
     @staticmethod
     def _expected_token(version: DocumentVersion | None) -> str | None:

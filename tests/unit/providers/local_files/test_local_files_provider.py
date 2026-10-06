@@ -1653,3 +1653,82 @@ def test_create_rejects_refs_the_provider_cannot_interpret(
     assert (result.message or "").startswith(f"[local_files:{code}]")
     assert result.resolved_ref == ref
     assert _tree(root) == []
+
+
+# ---------------------------------------------------------------------------
+# apply_changes: unencodable content (R3-004) and upper-case .MD titles (R3-002)
+# ---------------------------------------------------------------------------
+
+_LONE_SURROGATE = "a\ud800b"
+
+
+def _assert_encode_error(result: AppliedOperationResult) -> None:
+    message = result.message or ""
+    assert result.status is OperationStatus.FAILED
+    assert message.startswith("[local_files:document.encode_error]")
+    assert "not valid UTF-8-encodable" in message
+    assert "unpaired surrogate" in message
+    assert "Hint:" in message
+    assert "[local_files:io.error]" not in message
+    assert "permissions" not in message
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        _create(_LONE_SURROGATE, ref=_ref("docs/a.md")),
+        _child("docs/guide.md", _LONE_SURROGATE, "Child"),
+        _update("a.md", _LONE_SURROGATE),
+    ],
+    ids=["create", "child", "update"],
+)
+def test_unencodable_content_is_reported_as_an_encode_error(
+    root: Path, operation: Any
+) -> None:
+    _write(root, "a.md", b"old")
+
+    result = _apply_one(_provider(root), operation)
+
+    _assert_encode_error(result)
+    assert _tree(root) == ["a.md"]
+    assert (root / "a.md").read_bytes() == b"old"
+
+
+def test_an_encode_error_names_the_path_and_keeps_later_operations_running(
+    root: Path,
+) -> None:
+    result = _apply(
+        _provider(root),
+        _create("one", ref=_ref("one.md")),
+        _create(_LONE_SURROGATE, ref=_ref("bad.md")),
+        _create("two", ref=_ref("two.md")),
+    )
+
+    assert [r.status for r in result.results] == [
+        OperationStatus.APPLIED,
+        OperationStatus.FAILED,
+        OperationStatus.APPLIED,
+    ]
+    _assert_encode_error(result.results[1])
+    assert "path='bad.md'" in (result.results[1].message or "")
+    assert not (root / "bad.md").exists()
+    assert (root / "two.md").read_bytes() == b"two"
+
+
+def test_a_child_title_ending_in_upper_case_md_keeps_its_suffix(root: Path) -> None:
+    result = _apply_one(_provider(root), _child("docs/guide.md", "body", "Setup.MD"))
+
+    assert result.status is OperationStatus.APPLIED
+    assert result.resolved_ref is not None
+    assert result.resolved_ref.locator == {"path": "docs/guide/Setup.MD"}
+    assert (root / "docs/guide/Setup.MD").read_bytes() == b"body"
+    assert _tree(root) == ["docs", "docs/guide", "docs/guide/Setup.MD"]
+
+
+def test_a_root_level_title_ending_in_mixed_case_md_keeps_its_suffix(
+    root: Path,
+) -> None:
+    result = _apply_one(_provider(root), _create("body", title="Notes.Md"))
+
+    assert result.status is OperationStatus.APPLIED
+    assert (root / "Notes.Md").read_bytes() == b"body"
