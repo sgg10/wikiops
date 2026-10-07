@@ -196,6 +196,29 @@ class WikiSync:
         self._require_tracking_ref(branch)
         return self._snapshot(branch, offline=True)
 
+    def recheck(self) -> None:
+        """Re-check, under the held workdir lock, that nothing foreign appeared since the sync.
+
+        Writers call it at the start of every write sequence: the sync ran once per
+        instance, but the user may have edited the clone since. Raises
+        ``workdir.dirty`` (or ``workdir.manifest_corrupt``) before anything is written;
+        manifest entries that are no longer dirty are forgotten.
+        """
+        if not self.lock.held:
+            raise RuntimeError("re-checking needs the workdir lock: call recheck() inside lock.hold()")
+        self._require_no_foreign_changes()
+
+    def unpushed_commits(self) -> int:
+        """How many local commits the remote-tracking ref lacks, read now.
+
+        ``state.unpushed`` is a snapshot taken at sync time and goes stale after the
+        first commit or push of the run, so a writer that decides whether to push asks
+        for the live number. Read-only and local: no network, no lock needed.
+        """
+        if self._state is None:
+            raise RuntimeError("the workdir is not synced yet: call ensure_ready() first")
+        return self._count_unpushed(self._state.branch)
+
     # -- the two paths -----------------------------------------------------------
 
     def _offline_sync(self) -> SyncState:
@@ -403,22 +426,24 @@ class WikiSync:
 
     # -- result ---------------------------------------------------------------------------
 
-    def _snapshot(self, branch: str, *, offline: bool) -> SyncState:
-        head = self._git.local("rev-parse", "--verify", "HEAD").stdout.strip()
+    def _count_unpushed(self, branch: str) -> int:
         count = self._git.local("rev-list", "--count", f"origin/{branch}..HEAD").stdout.strip()
         try:
-            unpushed = int(count)
+            return int(count)
         except ValueError as exc:
             raise GithubWikiError(
                 "sync.git_failed",
                 "git rev-list returned an unexpected count",
                 context={"op": "rev-list", "workdir": str(self._git.workdir)},
             ) from exc
+
+    def _snapshot(self, branch: str, *, offline: bool) -> SyncState:
+        head = self._git.local("rev-parse", "--verify", "HEAD").stdout.strip()
         return SyncState(
             workdir=self._git.workdir,
             branch=branch,
             head_sha=head,
             offline=offline,
-            unpushed=unpushed,
+            unpushed=self._count_unpushed(branch),
             pending=len(self.manifest),
         )

@@ -24,7 +24,7 @@ from tests.support.fake_git_runner import FakeGitRunner
 from tests.support.fake_wiki_git import FakeWikiGit, subcommand_and_args
 from wikiops.providers.github_wiki.auth import build_strategy
 from wikiops.providers.github_wiki.backend import EntryPointBackendResolver
-from wikiops.providers.github_wiki.ports import BackendResolver
+from wikiops.providers.github_wiki.ports import BackendResolver, CredentialStrategy
 from wikiops.providers.github_wiki.provider import GithubWikiProvider
 from wikiops.providers.github_wiki.settings import (
     GithubWikiProviderSettings,
@@ -72,6 +72,26 @@ class ProviderHarness:
     runner: FakeGitRunner
     fake: FakeWikiGit
     resolver: CountingResolver
+    raw: dict[str, Any] = field(default_factory=dict)
+    credentials: CredentialStrategy | None = None
+    which: Callable[[str], str | None] = fake_which
+    cache_dir: Path | None = None
+
+    def rebuild(self, **overrides: Any) -> GithubWikiProvider:
+        """A NEW provider over the same runner, clone and credentials with changed raw settings.
+
+        Models the user editing the configuration between two runs (for example
+        switching ``allow_auto_commit``): nothing but the settings differs.
+        """
+        assert self.credentials is not None
+        return GithubWikiProvider(
+            parse_settings({**self.raw, **overrides}),
+            runner=self.runner,
+            credentials=self.credentials,
+            backends=self.resolver,
+            which=self.which,
+            cache_dir=self.cache_dir,
+        )
 
     def git_subcommands(self) -> list[str]:
         return [
@@ -97,14 +117,17 @@ def build_provider(
     gh_token: str | None = None,
     cache_dir: Path | None = None,
     which: Callable[[str], str | None] = fake_which,
+    backends: BackendResolver | None = None,
     **model: Any,
 ) -> ProviderHarness:
     """A provider whose workdir is ``tmp_path/cache/wiki`` unless settings name another.
 
     ``settings`` overrides the raw provider settings (``workdir`` included),
     ``environ`` is what the env strategy sees, ``which`` resolves executables,
-    ``gh_token`` is what a scripted ``gh auth token`` prints, and ``model``
-    configures the ``FakeWikiGit``.
+    ``gh_token`` is what a scripted ``gh auth token`` prints, ``backends``
+    replaces the resolver that creates the inner backend, and ``model``
+    configures the ``FakeWikiGit`` (``track_files=True`` lets it see the files
+    a real backend writes).
     """
     raw: dict[str, Any] = {
         "provider_name": "docs",
@@ -124,7 +147,7 @@ def build_provider(
         target.mkdir(parents=True, exist_ok=True)
         fake.install_clone()
 
-    resolver = CountingResolver(real_resolver())
+    resolver = CountingResolver(backends or real_resolver())
     provider = GithubWikiProvider(
         parsed,
         runner=runner,
@@ -133,7 +156,9 @@ def build_provider(
         which=which,
         cache_dir=cache_dir,
     )
-    return ProviderHarness(provider, parsed, target, runner, fake, resolver)
+    return ProviderHarness(
+        provider, parsed, target, runner, fake, resolver, raw, credentials, which, cache_dir
+    )
 
 
 def _default_workdir(

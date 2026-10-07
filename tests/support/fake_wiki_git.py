@@ -15,6 +15,13 @@ It also models the publishing side: ``add`` fills an index, ``diff --cached
 committed paths, and ``push --porcelain`` fast-forwards the remote branch or
 answers with a ``[rejected]`` line when the remote moved on after the last fetch.
 
+With ``track_files`` the model also looks at the workdir: a file below it (outside
+``.git``) that is not in ``committed_files`` is untracked, one whose bytes differ
+from the committed ones is modified, and a committed file that vanished is
+deleted; ``commit`` snapshots the committed paths. That is what lets a real
+backend write pages and the provider see them as dirty, exactly as git would.
+Entries in ``dirty`` still add foreign changes by hand.
+
 Failure injection: set ``fail[<subcommand>]`` to a ``CommandResult`` factory
 input (returncode, stderr) and that subcommand answers with it instead.
 """
@@ -75,6 +82,8 @@ class FakeWikiGit:
     # checked-out branch and the origin/HEAD target (the lenient default)
     tracking_refs: set[str] | None = None
     dirty: list[str] = field(default_factory=list)  # raw porcelain entries ("?? Home.md")
+    track_files: bool = False  # derive dirty entries from the files below the workdir as well
+    committed_files: dict[str, bytes] = field(default_factory=dict)  # path -> committed bytes
     top_level: Path | None = None  # what `rev-parse --show-toplevel` prints (default: workdir)
     git_dir_path: Path | None = None  # what `rev-parse --absolute-git-dir` prints (default: workdir/.git)
     head_valid: bool = True  # False: a partial clone with no commit
@@ -218,12 +227,38 @@ class FakeWikiGit:
             return 0, f"refs/remotes/origin/{self.origin_head}\n", ""
         raise AssertionError(f"unmodelled symbolic-ref: {args}")
 
+    def dirty_entries(self) -> list[str]:
+        """Porcelain entries of the manual ``dirty`` list plus, when tracking, the files on disk."""
+        entries = list(self.dirty)
+        if not self.track_files:
+            return entries
+        known = {self._dirty_path(entry) for entry in entries}
+        on_disk: dict[str, bytes] = {}
+        for found in sorted(self.workdir.rglob("*")):
+            relative = found.relative_to(self.workdir)
+            if ".git" in relative.parts or not found.is_file():
+                continue
+            on_disk[relative.as_posix()] = found.read_bytes()
+        for path, data in on_disk.items():
+            if path in known:
+                continue
+            if path not in self.committed_files:
+                entries.append(f"?? {path}")
+            elif self.committed_files[path] != data:
+                entries.append(f" M {path}")
+        entries += [
+            f" D {path}"
+            for path in sorted(self.committed_files)
+            if path not in on_disk and path not in known
+        ]
+        return entries
+
     def _cmd_status(self, args, call):
         error = self._repo_or_error()
         if error:
             return error
         assert args == ["--porcelain=v1", "-z", "--untracked-files=all"], args
-        return 0, "".join(f"{entry}\0" for entry in self.dirty), ""
+        return 0, "".join(f"{entry}\0" for entry in self.dirty_entries()), ""
 
     # -- publishing commands ------------------------------------------------------
 
@@ -238,7 +273,7 @@ class FakeWikiGit:
 
     def _cmd_diff(self, args, call):
         assert args[:3] == ["--cached", "--quiet", "--"] and len(args) > 3, args
-        changed = {self._dirty_path(entry) for entry in self.dirty}
+        changed = {self._dirty_path(entry) for entry in self.dirty_entries()}
         differs = any(path in self.staged and path in changed for path in args[3:])
         return (1 if differs else 0), "", ""
 
@@ -263,6 +298,12 @@ class FakeWikiGit:
         self.commits.append(FakeCommit(args[1], paths, author, committer, dict(call.env_overrides)))
         self.local.append(f"w{len(self.commits)}")
         self.dirty = [entry for entry in self.dirty if self._dirty_path(entry) not in paths]
+        for path in paths:
+            target = self.workdir / path
+            if target.is_file():
+                self.committed_files[path] = target.read_bytes()
+            else:
+                self.committed_files.pop(path, None)
         self.staged -= set(paths)
         return 0, f"[{self.local_branch} {sha_for(self.local[-1])[:7]}] {args[1]}\n", ""
 
