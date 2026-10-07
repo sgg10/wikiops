@@ -16,7 +16,8 @@ import pytest
 
 from tests.support.publisher_harness import PublisherHarness, build_publisher
 from wikiops.providers.github_wiki.errors import GithubWikiError
-from wikiops.providers.github_wiki.publisher import render_commit_message
+from wikiops.providers.github_wiki.publisher import Publisher, render_commit_message
+from wikiops.providers.github_wiki.settings import CommitSettings
 
 ADD = ("git", "--literal-pathspecs", "add", "--")
 BOT = ("wikiops", "wikiops@users.noreply.github.com")
@@ -423,6 +424,76 @@ def test_recovery_after_a_failed_commit_commits_both_pages(wiki: PublisherHarnes
     assert outcome.error is None and outcome.committed is True
     assert wiki.fake.commits[0].paths == ("Home.md", "Other.md")
     assert wiki.manifest.entries() == {}
+
+
+# -- failures stay in the outcome ------------------------------------------------------------------
+
+
+def test_a_head_that_cannot_be_read_after_the_commit_is_reported_in_the_outcome(
+    wiki: PublisherHarness,
+) -> None:
+    wiki.write("Home.md")
+    wiki.fake.fail["rev-parse"] = (128, "fatal: unable to read HEAD\n")
+
+    outcome = wiki.publish(["Home.md"])  # must not raise: the commit exists
+
+    assert len(wiki.fake.commits) == 1
+    assert outcome.committed is True and outcome.sha is None and outcome.pushed is False
+    assert [item.committed for item in outcome.paths] == [True]
+    error = outcome.error
+    assert error is not None and error.code == "sync.git_failed"
+    assert "committed locally" in str(error) and "sha could not be read" in str(error)
+    assert str(wiki.workdir) in str(error)
+    assert "unable to read HEAD" in str(error)
+    assert outcome.note == ""
+    assert wiki.manifest.entries() == {}  # the commit took the page out of the manifest
+
+
+def test_a_head_read_that_times_out_after_the_commit_keeps_its_timeout_code(
+    wiki: PublisherHarness,
+) -> None:
+    wiki.write("Home.md")
+    wiki.fake.timeout_on.add("rev-parse")
+
+    outcome = wiki.publish(["Home.md"])
+
+    assert outcome.committed is True and outcome.sha is None
+    assert outcome.error is not None and outcome.error.code == "sync.timeout"
+    assert "committed locally" in str(outcome.error) and str(wiki.workdir) in str(outcome.error)
+
+
+def test_a_message_that_cannot_be_rendered_fails_before_anything_is_staged(
+    wiki: PublisherHarness,
+) -> None:
+    broken = CommitSettings().model_copy(update={"message": "x {nope}"})
+    publisher = Publisher(
+        wiki.git, wiki.manifest, wiki.lock, commit=broken, branch="master", provider_name="n", push=False
+    )
+    wiki.write("Home.md")
+
+    with wiki.lock.hold("apply"):
+        outcome = publisher.publish(["Home.md"], plugin_id="p", page_count=1)
+
+    error = outcome.error
+    assert error is not None and error.code == "config.invalid_message"  # never recoded
+    assert "{nope}" in str(error) and "written but not committed" in str(error)
+    assert str(wiki.workdir) in str(error)
+    assert "add" not in wiki.subcommands() and "commit" not in wiki.subcommands()
+    assert wiki.fake.staged == set()  # nothing was left staged
+    assert outcome.committed is False and outcome.sha is None
+    assert set(wiki.manifest.entries()) == {"Home.md"}  # still pending for the next apply
+
+
+def test_a_valid_message_is_rendered_once_before_the_first_staging_command(
+    wiki: PublisherHarness,
+) -> None:
+    wiki.write("Home.md")
+
+    outcome = wiki.publish(["Home.md"])
+
+    assert outcome.error is None and len(wiki.fake.commits) == 1
+    assert wiki.subcommands().index("add") < wiki.subcommands().index("commit")
+    assert wiki.fake.commits[0].message == "docs(wiki): update via wikiops plugin azure-docs"
 
 
 # -- the workdir lock (GW-S15) ----------------------------------------------------------------------

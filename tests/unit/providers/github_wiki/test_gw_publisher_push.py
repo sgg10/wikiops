@@ -251,3 +251,32 @@ def test_a_push_failure_after_unpushed_only_still_names_head(pusher: PublisherHa
     assert outcome.error is not None and outcome.error.code == "push.rejected"
     assert outcome.error.context["sha"] == short("old-unpushed")
     assert outcome.committed is False  # nothing new; the earlier commits are retained too
+
+
+# -- an unreadable HEAD stays in the outcome ------------------------------------------------------
+
+
+def test_an_unreadable_head_after_the_commit_skips_the_push_and_keeps_the_commit(
+    pusher: PublisherHarness,
+) -> None:
+    pusher.fake.fail["rev-parse"] = (128, "fatal: unable to read HEAD\n")
+
+    outcome = pushed_page(pusher)  # does not raise
+
+    assert len(pusher.fake.commits) == 1 and pusher.fake.pushes == []
+    assert outcome.committed is True and outcome.sha is None and outcome.pushed is False
+    assert outcome.error is not None and "not pushed" in str(outcome.error)
+    assert str(pusher.workdir) in str(outcome.error)
+
+
+def test_an_unreadable_head_before_an_unpushed_only_push_is_reported_not_raised(
+    pusher: PublisherHarness,
+) -> None:
+    pusher.fake.fail["rev-parse"] = (128, "fatal: unable to read HEAD\n")
+
+    outcome = pusher.publish([], unpushed=2)
+
+    assert pusher.fake.pushes == []
+    assert outcome.committed is False and outcome.sha is None and outcome.pushed is False
+    assert outcome.error is not None and outcome.error.code == "sync.git_failed"
+    assert "not pushed" in str(outcome.error) and str(pusher.workdir) in str(outcome.error)

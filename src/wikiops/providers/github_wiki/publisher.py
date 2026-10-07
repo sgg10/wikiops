@@ -46,7 +46,8 @@ from wikiops.providers.github_wiki.settings import CommitSettings
 
 _SHA_LENGTH = 7
 _WRITTEN_BUT_NOT_COMMITTED = "written but not committed"
-_IDENTITY_MISSING = "commit.identity_missing"
+# Codes that keep their own name when the commit step fails (never recoded as commit.failed).
+_KEPT_COMMIT_CODES = frozenset({"commit.identity_missing", "config.invalid_message"})
 
 PathOrigin = Literal["written", "pending"]
 
@@ -185,18 +186,28 @@ class Publisher:
         committed = False
         if stage:
             try:
-                committed = self._stage_and_commit(
-                    [item.path for item in stage], plugin_id=plugin_id, page_count=page_count
+                message = render_commit_message(
+                    self._commit.message,
+                    plugin_id=plugin_id,
+                    provider_name=self._provider_name,
+                    page_count=page_count,
                 )
+                committed = self._stage_and_commit([item.path for item in stage], message)
             except GithubWikiError as error:
                 return self._outcome(stage, committed=False, error=self._commit_failure(error))
-            if committed:
-                sha = self._head()
             # Committed now, or identical to HEAD already: either way nothing stays pending.
             self._manifest.discard(item.path for item in stage)
+            if committed:
+                try:
+                    sha = self._head()
+                except GithubWikiError as error:
+                    return self._outcome(stage, committed=True, error=self._head_failure(error))
         if not self._push or not (committed or unpushed > 0):
             return self._outcome(stage, committed=committed, sha=sha)
-        sha = sha or self._head()
+        try:
+            sha = sha or self._head()
+        except GithubWikiError as error:
+            return self._outcome(stage, committed=committed, error=self._head_failure(error))
         try:
             self._git.push(self._branch, context={"sha": sha[:_SHA_LENGTH]})
         except GithubWikiError as error:
@@ -213,7 +224,7 @@ class Publisher:
         origins.update({path: "written" for path in written})
         return tuple(PathResult(path, origins[path], False) for path in sorted(origins))
 
-    def _stage_and_commit(self, paths: list[str], *, plugin_id: str, page_count: int) -> bool:
+    def _stage_and_commit(self, paths: list[str], message: str) -> bool:
         """Stage ``paths`` and commit them; ``False`` when they do not differ from HEAD."""
         self._git.local("add", paths=paths, op="add")
         staged = self._git.local("diff", "--cached", "--quiet", paths=paths, check=False)
@@ -226,12 +237,6 @@ class Publisher:
             )
         if staged.returncode == 0:
             return False
-        message = render_commit_message(
-            self._commit.message,
-            plugin_id=plugin_id,
-            provider_name=self._provider_name,
-            page_count=page_count,
-        )
         self._git.local(
             "commit", "-m", message, paths=paths, op="commit", env=_identity_environment(self._commit)
         )
@@ -262,13 +267,23 @@ class Publisher:
         )
 
     def _commit_failure(self, error: GithubWikiError) -> GithubWikiError:
-        """The failure as ``commit.failed`` (or ``commit.identity_missing``): nothing was committed."""
-        code = _IDENTITY_MISSING if error.code == _IDENTITY_MISSING else "commit.failed"
+        """The failure as ``commit.failed`` (or its own specific code): nothing was committed."""
+        code = error.code if error.code in _KEPT_COMMIT_CODES else "commit.failed"
         return GithubWikiError(
             code,
             f"{error.summary}: {_WRITTEN_BUT_NOT_COMMITTED}",
             context={**error.context, "workdir": str(self._git.workdir)},
             hint=error.hint if error.code == code else None,
+        )
+
+    def _head_failure(self, error: GithubWikiError) -> GithubWikiError:
+        """HEAD could not be read: the commit (if any) exists, its sha is unknown, nothing is pushed."""
+        return GithubWikiError(
+            error.code,
+            f"committed locally in '{self._git.workdir}' but its sha could not be read "
+            f"(not pushed): {error.summary}",
+            context={**error.context, "workdir": str(self._git.workdir)},
+            hint=error.hint,
         )
 
     def _push_failure(self, error: GithubWikiError, sha: str) -> GithubWikiError:
