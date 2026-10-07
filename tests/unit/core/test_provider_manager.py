@@ -340,3 +340,130 @@ def test_target_describing_protocol_rejects_providers_without_describe_target() 
 
     assert not isinstance(provider, TargetDescribingProvider)
     assert not isinstance(object(), TargetDescribingProvider)
+
+
+# -- settings_model_for: read-only access to a factory's settings model ------------
+
+
+def test_settings_model_for_returns_the_model_of_the_built_in_providers(
+    monkeypatch: pytest.MonkeyPatch,
+    entry_point_factory,
+) -> None:
+    from wikiops.providers.azure_devops.provider import (
+        AzureDevOpsWikiProviderFactory,
+        PatAzureDevOpsProviderSettings,
+    )
+    from wikiops.providers.local_files.provider import (
+        LocalFilesProviderFactory,
+        LocalFilesProviderSettings,
+    )
+
+    manager = ProviderManager()
+    _patch_entry_points(
+        monkeypatch,
+        [
+            entry_point_factory("local_files", LocalFilesProviderFactory),
+            entry_point_factory("azure_devops_wiki", AzureDevOpsWikiProviderFactory),
+        ],
+    )
+
+    assert manager.settings_model_for("local_files") is LocalFilesProviderSettings
+    assert manager.settings_model_for("azure_devops_wiki") is PatAzureDevOpsProviderSettings
+
+
+def test_settings_model_for_returns_the_model_of_a_custom_factory(
+    monkeypatch: pytest.MonkeyPatch,
+    entry_point_factory,
+) -> None:
+    manager = ProviderManager()
+    _patch_entry_points(monkeypatch, [entry_point_factory("demo", DemoProviderFactory)])
+
+    model = manager.settings_model_for("demo-provider")
+
+    assert model is DemoProviderSettings
+    assert "endpoint" in model.model_fields
+
+
+def test_settings_model_for_is_none_for_a_factory_without_a_settings_model(
+    monkeypatch: pytest.MonkeyPatch,
+    entry_point_factory,
+) -> None:
+    class NoModelFactory(DemoProviderFactory):
+        provider_id = "no-model"
+        settings_model = None
+
+    manager = ProviderManager()
+    _patch_entry_points(
+        monkeypatch,
+        [
+            entry_point_factory("no-model", NoModelFactory),
+            entry_point_factory("legacy", LegacyProviderFactory),
+        ],
+    )
+
+    assert manager.settings_model_for("no-model") is None
+    assert manager.settings_model_for("legacy-provider") is None
+
+
+def test_settings_model_for_is_none_for_an_unusable_model_and_never_raises(
+    monkeypatch: pytest.MonkeyPatch,
+    entry_point_factory,
+) -> None:
+    manager = ProviderManager()
+    _patch_entry_points(
+        monkeypatch, [entry_point_factory("invalid", InvalidSettingsModelFactory)]
+    )
+
+    # create() reports this factory defect; the read-only accessor just has no model.
+    assert manager.settings_model_for("invalid-settings") is None
+
+
+def test_settings_model_for_is_none_for_an_unknown_provider_type(
+    monkeypatch: pytest.MonkeyPatch,
+    entry_point_factory,
+) -> None:
+    manager = ProviderManager()
+    _patch_entry_points(monkeypatch, [entry_point_factory("demo", DemoProviderFactory)])
+
+    assert manager.settings_model_for("missing") is None
+    assert manager.settings_model_for("") is None
+
+
+def test_settings_model_for_loads_once_and_never_instantiates_providers(
+    monkeypatch: pytest.MonkeyPatch,
+    entry_point_factory,
+) -> None:
+    calls = {"entry_points": 0, "create": 0}
+
+    class CountingFactory(DemoProviderFactory):
+        def create(self, settings: DemoProviderSettings) -> DemoProvider:
+            calls["create"] += 1
+            return super().create(settings)
+
+    def _entry_points(**_kwargs):
+        calls["entry_points"] += 1
+        return [entry_point_factory("demo", CountingFactory)]
+
+    monkeypatch.setattr("wikiops.core.provider_manager.entry_points", _entry_points)
+    manager = ProviderManager()
+
+    first = manager.settings_model_for("demo-provider")
+    second = manager.settings_model_for("demo-provider")
+    manager.settings_model_for("missing")
+
+    assert first is second is DemoProviderSettings
+    assert calls == {"entry_points": 1, "create": 0}
+
+
+def test_settings_model_for_does_not_change_how_providers_are_created(
+    monkeypatch: pytest.MonkeyPatch,
+    entry_point_factory,
+) -> None:
+    manager = ProviderManager()
+    _patch_entry_points(monkeypatch, [entry_point_factory("demo", DemoProviderFactory)])
+
+    manager.settings_model_for("demo-provider")
+    provider = manager.create("demo-provider", {"provider_name": "demo"})
+
+    assert provider.validated is True
+    assert provider.settings.provider_name == "demo"

@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Protocol, Type, runtime_checkable
+from typing import Any, Dict, List, Optional, Protocol, Type, runtime_checkable
 from importlib.metadata import entry_points
 
 from wikiops.core.exceptions import ConfigurationError
@@ -122,6 +122,22 @@ class ProviderManager:
             self._ensure_provider_compatibility(provider)
         provider.validate_settings()
         return provider
+
+    def settings_model_for(self, provider_type: str) -> Optional[Type[ProviderSettings]]:
+        """Return the settings model a provider type declares, without creating it.
+
+        Read-only: loads the factories (once) but never validates settings or
+        instantiates a provider. ``None`` when the type is unknown, its factory
+        declares no ``settings_model`` (it validates settings itself) or the
+        declared model is not a ``ProviderSettings`` subclass (``create`` reports
+        that factory defect).
+        """
+        self.load()
+        factory = self._factories.get(provider_type)
+        settings_model = getattr(factory, "settings_model", None)
+        if isinstance(settings_model, type) and issubclass(settings_model, ProviderSettings):
+            return settings_model
+        return None
 
     def list_types(self) -> List[str]:
         """Returns a list of available provider types."""
