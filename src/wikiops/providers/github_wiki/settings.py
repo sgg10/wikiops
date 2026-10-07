@@ -252,6 +252,33 @@ def _message_problem(message: str) -> str | None:
     return None
 
 
+def check_repository(value: str) -> str:
+    """Return ``value`` if it is an ``owner/repo`` name, else raise ``config.invalid_repository``."""
+    name = value.rsplit("/", 1)[-1].lower()
+    if (
+        not _REPOSITORY.fullmatch(value)
+        or name in {".", ".."}
+        or name.endswith((".wiki", ".git"))
+    ):
+        raise CodedValueError(
+            "config.invalid_repository",
+            "repository must look like 'owner/repo'",
+            context={"repository": value},
+        )
+    return value
+
+
+def check_host(value: str) -> str:
+    """Return ``value`` if it is a bare hostname, else raise ``config.invalid_host``."""
+    if not _HOST.fullmatch(value):
+        raise CodedValueError(
+            "config.invalid_host",
+            "host must be a bare hostname",
+            context={"host": value},
+        )
+    return value
+
+
 # -- aggregate models ------------------------------------------------------
 
 
@@ -315,32 +342,8 @@ class GithubWikiProviderSettings(ProviderSettings):
     local_backend: LocalBackendSettings = Field(default_factory=LocalBackendSettings)
     git_timeout_seconds: int = Field(120, ge=5, le=3600)
 
-    @field_validator("repository")
-    @classmethod
-    def _valid_repository(cls, value: str) -> str:
-        name = value.rsplit("/", 1)[-1].lower()
-        if (
-            not _REPOSITORY.fullmatch(value)
-            or name in {".", ".."}
-            or name.endswith((".wiki", ".git"))
-        ):
-            raise CodedValueError(
-                "config.invalid_repository",
-                "repository must look like 'owner/repo'",
-                context={"repository": value},
-            )
-        return value
-
-    @field_validator("host")
-    @classmethod
-    def _valid_host(cls, value: str) -> str:
-        if not _HOST.fullmatch(value):
-            raise CodedValueError(
-                "config.invalid_host",
-                "host must be a bare hostname",
-                context={"host": value},
-            )
-        return value
+    _check_repository = field_validator("repository")(check_repository)
+    _check_host = field_validator("host")(check_host)
 
     @field_validator("branch")
     @classmethod

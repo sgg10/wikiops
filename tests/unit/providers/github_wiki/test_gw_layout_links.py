@@ -188,6 +188,66 @@ def test_page_link_applies_the_page_policy_first() -> None:
     assert caught.value.code == "path.nested_not_supported"
 
 
+@pytest.mark.parametrize("path", [".md", ".MD", " .md"])
+def test_page_link_never_points_at_the_wiki_root_for_an_empty_stem(path: str) -> None:
+    with pytest.raises(GithubWikiError) as caught:
+        build_link(page_ref(path), host="github.com", repository="acme/platform")
+
+    assert caught.value.code == "path.not_markdown"
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "",
+        "https://github.com",
+        "user@github.com",
+        "github.com/path",
+        "github.com:443",
+        "-oProxyCommand=x",
+        "git hub.com",
+        "github.com\n.evil",
+    ],
+)
+def test_page_link_rejects_a_malformed_host(host: str) -> None:
+    with pytest.raises(GithubWikiError) as caught:
+        build_link(page_ref("Home.md"), host=host, repository="acme/platform")
+
+    assert caught.value.code == "config.invalid_host"
+    assert MESSAGE_SHAPE.match(str(caught.value))
+
+
+@pytest.mark.parametrize(
+    "repository",
+    [
+        "",
+        "platform",
+        "acme/platform/extra",
+        "acme/platform.wiki",
+        "acme/platform.git",
+        "acme/..",
+        "https://github.com/acme/platform",
+        "user:pw@acme/platform",
+        "acme/plat form",
+        "acme/platform?x=1",
+        "../acme/platform",
+    ],
+)
+def test_page_link_rejects_a_malformed_repository(repository: str) -> None:
+    with pytest.raises(GithubWikiError) as caught:
+        build_link(page_ref("Home.md"), host="github.com", repository=repository)
+
+    assert caught.value.code == "config.invalid_repository"
+    assert MESSAGE_SHAPE.match(str(caught.value))
+
+
+def test_page_policy_is_checked_before_host_and_repository() -> None:
+    with pytest.raises(GithubWikiError) as caught:
+        build_link(page_ref("a/b.md"), host="", repository="")
+
+    assert caught.value.code == "path.nested_not_supported"
+
+
 def test_page_link_rejects_non_path_refs() -> None:
     with pytest.raises(GithubWikiError) as caught:
         build_link(

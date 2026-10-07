@@ -21,6 +21,11 @@ from wikiops_sdk.domain import AssetRef, AssetRefKind, DocumentRef, RefKind
 
 from wikiops.providers._fs import FsError, validate_relative_path
 from wikiops.providers.github_wiki.errors import GithubWikiError
+from wikiops.providers.github_wiki.settings import (
+    CodedValueError,
+    check_host,
+    check_repository,
+)
 
 _MARKDOWN_SUFFIX = ".md"
 _FOREIGN_MARKDOWN_SUFFIXES = frozenset({".markdown", ".mdx", ".txt"})
@@ -81,8 +86,9 @@ def validate_page_ref(ref: DocumentRef) -> str:
     Checks run in a fixed order and the first failure wins: reference kind
     (``ref.unsupported_kind``), presence of a path (``ref.missing_path``), a
     ``.git`` component (``path.reserved``), any path separator
-    (``path.nested_not_supported``) and the ``.md`` suffix, case-insensitive
-    (``path.not_markdown``). The returned name is the path unchanged.
+    (``path.nested_not_supported``) and the ``.md`` suffix, case-insensitive,
+    with a non-blank name before it (``path.not_markdown``). The returned name
+    is the path unchanged.
     """
     if ref.kind is not RefKind.PATH:
         raise GithubWikiError(
@@ -112,6 +118,13 @@ def validate_page_ref(ref: DocumentRef) -> str:
             "Wiki page paths must end in '.md'",
             context={"path": path},
             hint=f"use '{_suggest_markdown_name(path)}' instead",
+        )
+    if not path[: -len(_MARKDOWN_SUFFIX)].strip():
+        raise GithubWikiError(
+            "path.not_markdown",
+            "Wiki page paths need a name before '.md'",
+            context={"path": path},
+            hint="use a page name with at least one character before '.md', such as 'Home.md'",
         )
     return path
 
@@ -221,8 +234,17 @@ def build_link(ref: DocumentRef, *, host: str, repository: str) -> str:
     """Return the GitHub wiki URL of the page ``ref``: ``https://<host>/<owner>/<repo>/wiki/<stem>``.
 
     The page policy (:func:`validate_page_ref`) applies first, so only flat
-    Markdown pages get a link. The page stem is percent-encoded and the
+    Markdown pages get a link; ``host`` and ``repository`` then pass the same
+    shape rules as the settings (``config.invalid_host`` and
+    ``config.invalid_repository``). The page stem is percent-encoded and the
     ``host`` is honored for GitHub Enterprise.
     """
     stem = validate_page_ref(ref)[: -len(_MARKDOWN_SUFFIX)]
+    try:
+        check_host(host)
+        check_repository(repository)
+    except CodedValueError as exc:
+        raise GithubWikiError(
+            exc.code, exc.summary, context=exc.context, hint=exc.hint
+        ) from exc
     return guard_link(f"https://{host}/{repository}/wiki/{quote(stem, safe='')}")

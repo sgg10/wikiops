@@ -162,6 +162,21 @@ def test_page_without_md_suffix_is_not_markdown(path: str, suggestion: str) -> N
     assert f"'{suggestion}'" in error.hint
 
 
+@pytest.mark.parametrize("path", [".md", ".MD", ".Md", " .md", "\t.md", " .md"])
+def test_page_with_an_empty_stem_is_not_markdown(path: str) -> None:
+    error = failure(path_ref(path))
+
+    assert error.code == "path.not_markdown"
+    assert error.context["path"] == path
+    assert "before '.md'" in error.hint
+    assert MESSAGE_SHAPE.match(str(error))
+
+
+@pytest.mark.parametrize("path", ["a.md", "..md", " a.md", ".md.md", "-.md"])
+def test_page_with_a_non_blank_stem_stays_accepted(path: str) -> None:
+    assert validate_page_ref(path_ref(path)) == path
+
+
 # -- check order: kind -> missing -> reserved -> nested -> not_markdown -------
 
 

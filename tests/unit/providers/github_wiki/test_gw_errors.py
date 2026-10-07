@@ -201,6 +201,39 @@ def test_render_message_serves_warnings_that_are_never_raised() -> None:
     assert message.endswith(f"Hint: {CODES['sync.stale_plan'].default_hint.rstrip('.')}.")
 
 
+# -- empty hint rule: the rendered text and `.hint` always agree (S4.F3) ------
+
+EMPTY_HINTS = ["", "   ", "\n", "\t \r\n"]
+
+
+@pytest.mark.parametrize("hint", EMPTY_HINTS)
+def test_an_empty_or_blank_hint_falls_back_to_the_code_default(hint: str) -> None:
+    default = CODES["auth.rejected"].default_hint
+    error = GithubWikiError("auth.rejected", "Rejected", hint=hint)
+
+    assert error.hint == default
+    assert str(error).endswith(f"Hint: {default.rstrip('.')}.")
+    assert MESSAGE_SHAPE.fullmatch(str(error))
+
+
+@pytest.mark.parametrize("hint", EMPTY_HINTS)
+def test_render_message_applies_the_same_empty_hint_rule(hint: str) -> None:
+    error = GithubWikiError("sync.stale_plan", "Stale", hint=hint)
+    rendered = render_message("sync.stale_plan", "Stale", hint=hint)
+
+    assert rendered == str(error)
+    assert error.hint == CODES["sync.stale_plan"].default_hint
+
+
+def test_a_hint_with_content_is_kept_and_none_still_means_default() -> None:
+    kept = GithubWikiError("auth.rejected", "Rejected", hint="  try this  ")
+    absent = GithubWikiError("auth.rejected", "Rejected", hint=None)
+
+    assert kept.hint == "  try this  "
+    assert str(kept).endswith("Hint: try this.")
+    assert absent.hint == CODES["auth.rejected"].default_hint
+
+
 # -- single-line guarantee for user-controlled summary and hint (S3.F1) ------
 
 HOSTILE_TEXTS = [

@@ -164,6 +164,15 @@ def _one_line(value: object) -> str:
     return _CONTROL_CHARACTERS.sub(_escape_control, folded)
 
 
+def _effective_hint(spec: CodeSpec, hint: str | None) -> str:
+    """Return ``hint``, or the code default when it is absent, empty or blank.
+
+    One rule shared by the rendered message and ``GithubWikiError.hint``, so a
+    hint that renders as nothing can never be reported as an empty ``.hint``.
+    """
+    return hint if hint is not None and hint.strip() else spec.default_hint
+
+
 def render_message(
     code: str,
     summary: str,
@@ -173,7 +182,8 @@ def render_message(
 ) -> str:
     """Render ``[github_wiki:<code>] <summary>. k='v'... Hint: <action>.``.
 
-    Context entries whose value is ``None`` are skipped. Summary, hint and
+    Context entries whose value is ``None`` are skipped. An empty or blank
+    ``hint`` falls back to the code's default hint. Summary, hint and
     context values may carry user-controlled text, so each is folded onto one
     line and stripped of control characters: the first logical message always
     stays a single line.
@@ -189,7 +199,7 @@ def render_message(
     ]
     if pairs:
         parts.append(" ".join(pairs) + ".")
-    parts.append(f"Hint: {_one_line(hint or spec.default_hint).rstrip('.')}.")
+    parts.append(f"Hint: {_one_line(_effective_hint(spec, hint)).rstrip('.')}.")
     return " ".join(parts)
 
 
@@ -208,5 +218,5 @@ class GithubWikiError(ConfigurationError):
         self.code = code
         self.summary = summary
         self.context = dict(context or {})
-        self.hint = hint if hint is not None else CODES[code].default_hint
+        self.hint = _effective_hint(CODES[code], hint)
         super().__init__(message)
