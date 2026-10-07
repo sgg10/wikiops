@@ -43,6 +43,7 @@ from wikiops.providers.github_wiki.lock import WorkdirLock
 from wikiops.providers.github_wiki.ports import BackendResolver, CredentialStrategy, GitRunner
 from wikiops.providers.github_wiki.settings import GithubWikiProviderSettings
 from wikiops.providers.github_wiki.sync import SyncPurpose, WikiSync
+from wikiops.providers.github_wiki.text import escape_unsafe_characters
 from wikiops.providers.github_wiki.workdir import resolve_workdir
 
 PROVIDER_ID = "github_wiki"
@@ -70,6 +71,17 @@ _FETCH_HEAD = "FETCH_HEAD"
 
 def _flag(value: bool) -> str:
     return "true" if value else "false"
+
+
+def _quoted(value: object) -> str:
+    """Single-quote ``value`` so the note stays parseable whatever the text holds.
+
+    The POSIX idiom: an embedded apostrophe closes the quote, is escaped and
+    reopens it (``it's`` becomes ``'it'\\''s'``), so ``shlex.split`` decodes the
+    exact text and the next field can never be swallowed. Control and invisible
+    characters are made visible first, which keeps the note on one line.
+    """
+    return "'" + escape_unsafe_characters(str(value)).replace("'", "'\\''") + "'"
 
 
 def _last_fetch(workdir: Path) -> str | None:
@@ -203,8 +215,8 @@ class GithubWikiProvider:
         workdir = self._resolved_workdir()
         state = self._wiki_sync().peek()
         parts = [
-            f"remote='{self._credentials.remote_url}'",
-            f"workdir='{workdir}'",
+            f"remote={_quoted(self._credentials.remote_url)}",
+            f"workdir={_quoted(workdir)}",
             f"branch={state.branch if state else 'auto'}",
             f"auth={self._credentials.label}",
             f"auto_commit={_flag(self.settings.allow_auto_commit)}",

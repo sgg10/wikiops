@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import os
 import re
+import shlex
 from pathlib import Path
 
 import pytest
@@ -39,11 +40,9 @@ def record_pending(harness: ProviderHarness, *paths: str) -> None:
 
 
 def fields_of(note: str) -> dict[str, str]:
-    """``key=value`` pairs of the note, with quoted values unquoted."""
-    return {
-        key: value.strip("'")
-        for key, value in re.findall(r"(\w+)=('[^']*'|\S+)", note.split(" [github_wiki:")[0])
-    }
+    """``key=value`` pairs of the note; single-quoted values are decoded like a POSIX shell would."""
+    tokens = shlex.split(note.split(" [github_wiki:")[0])
+    return dict(token.split("=", 1) for token in tokens)
 
 
 # -- the default note ------------------------------------------------------------------------
@@ -72,7 +71,7 @@ def test_the_default_workdir_is_the_per_profile_cache_path_and_is_shown(tmp_path
 
     assert workdir == str(harness.workdir)
     assert workdir.startswith(str(cache.resolve()))
-    assert workdir.endswith("/github.com/acme/platform/p-docs")
+    assert Path(workdir).parts[-4:] == ("github.com", "acme", "platform", "p-docs")
 
 
 def test_there_is_no_sidebar_key_and_no_stale_warning_by_default(tmp_path: Path) -> None:
@@ -81,6 +80,55 @@ def test_there_is_no_sidebar_key_and_no_stale_warning_by_default(tmp_path: Path)
     assert "sidebar=" not in note  # the path of tmp_path may spell "sidebar" via the test name
     assert "stale_plan" not in note
     assert "pending_paths" not in note
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["it's a wiki", "'", "''", "a'b'c", "it\\'s", "quote\"s and $HOME `x`", "with space"],
+)
+def test_a_workdir_with_quotes_is_unambiguous_and_decodes_to_the_exact_path(
+    tmp_path: Path, name: str
+) -> None:
+    harness = build_provider(tmp_path, workdir=tmp_path / name)
+
+    note = harness.provider.describe_target()
+    fields = fields_of(note)
+
+    assert fields["workdir"] == str(harness.workdir)
+    assert fields["remote"] == "https://github.com/acme/platform.wiki.git"
+    assert fields["backend"] == "local_files"  # the fields after the path are not swallowed by it
+    assert list(fields) == [
+        "remote", "workdir", "branch", "auth", "auto_commit", "auto_push", "sync_on_plan", "backend",
+    ]
+
+
+def test_an_apostrophe_is_closed_escaped_and_reopened_in_the_note(tmp_path: Path) -> None:
+    harness = build_provider(tmp_path, workdir=tmp_path / "it's")
+
+    note = harness.provider.describe_target()
+
+    quoted = "'" + str(harness.workdir).replace("'", "'\\''") + "'"
+    assert quoted.endswith("it'\\''s'")
+    assert f"workdir={quoted} branch=auto" in note
+
+
+def test_control_characters_in_the_workdir_cannot_break_the_note_line(tmp_path: Path) -> None:
+    harness = build_provider(tmp_path, workdir=tmp_path / "a\nb\x1b[31m")
+
+    note = harness.provider.describe_target()
+
+    assert "\n" not in note
+    assert "\x1b" not in note
+    assert "a\\nb\\x1b[31m" in note
+
+
+def test_the_stale_warning_still_follows_a_workdir_with_an_apostrophe(tmp_path: Path) -> None:
+    harness = build_provider(tmp_path, workdir=tmp_path / "it's", settings={"sync_on_plan": False})
+
+    note = harness.provider.describe_target()
+
+    assert fields_of(note)["workdir"] == str(harness.workdir)
+    assert note.count("[github_wiki:sync.stale_plan]") == 1
 
 
 # -- flags, auth labels, remotes ---------------------------------------------------------------
