@@ -9,6 +9,12 @@ that model. It never starts a process; the clone's ``.git`` directory is the
 only thing it writes (an empty marker directory, so the workdir counts as
 non-empty and ``rev-parse --absolute-git-dir`` has somewhere to point).
 
+It also models the publishing side: ``add`` fills an index, ``diff --cached
+--quiet`` reports whether the staged paths differ from HEAD, ``commit`` records a
+``FakeCommit`` (message, paths, identity as git would resolve it) and cleans the
+committed paths, and ``push --porcelain`` fast-forwards the remote branch or
+answers with a ``[rejected]`` line when the remote moved on after the last fetch.
+
 Failure injection: set ``fail[<subcommand>]`` to a ``CommandResult`` factory
 input (returncode, stderr) and that subcommand answers with it instead.
 """
@@ -23,6 +29,17 @@ from wikiops.providers.github_wiki.ports import CommandResult
 
 GLOBAL_OPTIONS_WITH_VALUE = {"-c"}
 GLOBAL_FLAGS = {"--literal-pathspecs"}
+
+
+@dataclass(frozen=True)
+class FakeCommit:
+    """One commit made through the model: what was committed, with which identity."""
+
+    message: str
+    paths: tuple[str, ...]
+    author: tuple[str, str]  # (name, email)
+    committer: tuple[str, str]
+    env: dict[str, str | None]
 
 
 def sha_for(commit: str) -> str:
@@ -64,6 +81,11 @@ class FakeWikiGit:
     fail: dict[str, tuple[int, str]] = field(default_factory=dict)  # subcommand -> (rc, stderr)
     timeout_on: set[str] = field(default_factory=set)
     rev_list_output: str | None = None  # replaces the computed unpushed count (to inject garbage)
+    # publishing side
+    git_identity: tuple[str, str] | None = ("Git User", "git.user@example.test")  # configured user
+    staged: set[str] = field(default_factory=set)
+    commits: list[FakeCommit] = field(default_factory=list)
+    pushes: list[tuple[str, ...]] = field(default_factory=list)  # argv of every push
 
     # -- wiring -------------------------------------------------------------
 
@@ -202,6 +224,61 @@ class FakeWikiGit:
             return error
         assert args == ["--porcelain=v1", "-z", "--untracked-files=all"], args
         return 0, "".join(f"{entry}\0" for entry in self.dirty), ""
+
+    # -- publishing commands ------------------------------------------------------
+
+    @staticmethod
+    def _dirty_path(entry: str) -> str:
+        return entry[3:]
+
+    def _cmd_add(self, args, call):
+        assert args and args[0] == "--" and len(args) > 1, f"add must name explicit paths: {args}"
+        self.staged |= set(args[1:])
+        return 0, "", ""
+
+    def _cmd_diff(self, args, call):
+        assert args[:3] == ["--cached", "--quiet", "--"] and len(args) > 3, args
+        changed = {self._dirty_path(entry) for entry in self.dirty}
+        differs = any(path in self.staged and path in changed for path in args[3:])
+        return (1 if differs else 0), "", ""
+
+    def _identity_from(self, env, prefix):
+        name, email = env.get(f"GIT_{prefix}_NAME"), env.get(f"GIT_{prefix}_EMAIL")
+        if name and email:
+            return (name, email)
+        return self.git_identity
+
+    def _cmd_commit(self, args, call):
+        assert args[0] == "-m" and args[2] == "--" and len(args) > 3, args
+        author = self._identity_from(call.env_overrides, "AUTHOR")
+        committer = self._identity_from(call.env_overrides, "COMMITTER")
+        if author is None or committer is None:
+            return (
+                128,
+                "",
+                "Author identity unknown\n\n*** Please tell me who you are.\n"
+                "fatal: unable to auto-detect email address\n",
+            )
+        paths = tuple(args[3:])
+        self.commits.append(FakeCommit(args[1], paths, author, committer, dict(call.env_overrides)))
+        self.local.append(f"w{len(self.commits)}")
+        self.dirty = [entry for entry in self.dirty if self._dirty_path(entry) not in paths]
+        self.staged -= set(paths)
+        return 0, f"[{self.local_branch} {sha_for(self.local[-1])[:7]}] {args[1]}\n", ""
+
+    def _cmd_push(self, args, call):
+        self.pushes.append(call.argv)
+        target = args[-1].removeprefix("HEAD:refs/heads/")
+        remote = self.remote.get(target, [])
+        if self.local[: len(remote)] != remote:
+            return (
+                1,
+                f"To {self.remote_url}\n!\tHEAD:refs/heads/{target}\t[rejected] (fetch first)\nDone\n",
+                "error: failed to push some refs\n",
+            )
+        self.remote[target] = list(self.local)
+        self.tracking = list(self.local)
+        return 0, f"To {self.remote_url}\n*\tHEAD:refs/heads/{target}\t[new branch]\nDone\n", ""
 
     def _cmd_rev_list(self, args, call):
         error = self._repo_or_error()
