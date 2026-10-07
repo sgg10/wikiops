@@ -276,3 +276,26 @@ def test_a_rejected_backend_write_is_rolled_back_and_the_next_apply_goes_through
 
     assert statuses(again) == [OperationStatus.APPLIED]
     assert wiki.last_commit_files() == ["Next.md"]
+
+
+def test_a_user_file_created_during_a_failed_write_survives_the_real_rollback(wiki: Wiki) -> None:
+    resolver = ScriptedResolver()
+    wiki.resolver = resolver
+    provider = wiki.provider()
+    provider.exists(ref(SEED_PAGE))
+    assert resolver.backend is not None
+
+    def write_a_user_file_then_raise(changeset, real):  # noqa: ANN001, ANN202
+        (wiki.workdir / "Mine.md").write_text("the user's own page\n")
+        raise RuntimeError("disk exploded")
+
+    resolver.backend.on_apply = write_a_user_file_then_raise
+
+    failed = provider.apply_changes(change_set(create("Orphan.md", "# orphan\n"), update(SEED_PAGE, "# edited\n")))
+
+    assert statuses(failed) == [OperationStatus.FAILED] * 2
+    assert all("'Mine.md'" in (item.message or "") for item in failed.results)
+    assert not (wiki.workdir / "Orphan.md").exists()  # the operation's own file is gone
+    assert (wiki.workdir / SEED_PAGE).read_text() == SEED_CONTENT  # and the tracked page is back
+    assert (wiki.workdir / "Mine.md").read_text() == "the user's own page\n"  # the user's file is not ours
+    assert wiki.status() == ["?? Mine.md"]

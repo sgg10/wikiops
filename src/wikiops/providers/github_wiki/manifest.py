@@ -54,13 +54,33 @@ def _malformed_status(entry: str) -> NoReturn:
     )
 
 
-def parse_status(text: str) -> tuple[str, ...]:
-    """Return every path named by ``git status --porcelain=v1 -z`` output.
+@dataclass(frozen=True)
+class StatusEntry:
+    """One path of ``git status --porcelain=v1 -z``, with its two-letter ``XY`` status.
 
-    Entries are ``XY <path>`` separated by NUL; a rename or copy (``R``/``C`` in
-    either status column) is followed by an extra NUL-separated field holding the
-    origin, and both paths are returned. Paths are taken verbatim (``-z`` never
-    quotes them).
+    The origin of a rename or copy is an entry of its own and carries the same status.
+    """
+
+    status: str
+    path: str
+
+    @property
+    def untracked(self) -> bool:
+        return self.status == "??"
+
+    @property
+    def collapsed_directory(self) -> bool:
+        """A nested repository, which git reports as ``dir/`` instead of listing its files."""
+        return self.path.endswith("/")
+
+
+def parse_status_entries(text: str) -> tuple[StatusEntry, ...]:
+    """Return every entry named by ``git status --porcelain=v1 -z`` output.
+
+    This is the one parser of porcelain output in the provider; ``parse_status`` is its
+    path-only view. Entries are ``XY <path>`` separated by NUL; a rename or copy (``R``/``C``
+    in either status column) is followed by an extra NUL-separated field holding the
+    origin, and both paths are returned. Paths are taken verbatim (``-z`` never quotes them).
 
     A trailing ``/`` marks a collapsed untracked directory (git reports a nested
     repository that way even with ``--untracked-files=all``). It is kept as given:
@@ -71,7 +91,7 @@ def parse_status(text: str) -> tuple[str, ...]:
     fields = text.split("\0")
     if fields and fields[-1] == "":
         fields.pop()
-    paths: list[str] = []
+    entries: list[StatusEntry] = []
     index = 0
     while index < len(fields):
         entry = fields[index]
@@ -82,13 +102,18 @@ def parse_status(text: str) -> tuple[str, ...]:
         path = entry[3:]
         if path.endswith("/") and status != "??":
             _malformed_status(entry)
-        paths.append(path)
+        entries.append(StatusEntry(status, path))
         if "R" in status or "C" in status:
             if index >= len(fields) or not fields[index]:
                 _malformed_status(entry)
-            paths.append(fields[index])
+            entries.append(StatusEntry(status, fields[index]))
             index += 1
-    return tuple(paths)
+    return tuple(entries)
+
+
+def parse_status(text: str) -> tuple[str, ...]:
+    """Return every path named by ``git status --porcelain=v1 -z`` output (see ``parse_status_entries``)."""
+    return tuple(entry.path for entry in parse_status_entries(text))
 
 
 # -- manifest -----------------------------------------------------------------

@@ -12,12 +12,15 @@ forward blindly:
   the reference string the backend reports. Files the backend wrote without reporting
   them are never part of the written set, so they can never be staged.
 * ``annotate`` maps what publishing did (a note, or a coded error) onto the results.
+* ``page_targets`` and ``asset_owner`` say which paths an operation is the one to write,
+  which is all the rollback may touch if it has to undo that operation.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import Any
 
 from wikiops_sdk.domain import (
@@ -30,9 +33,11 @@ from wikiops_sdk.domain import (
     UpdateDocumentOperation,
 )
 
+from wikiops.providers._fs import FsError, hashed_asset_name
 from wikiops.providers.github_wiki import layout
 from wikiops.providers.github_wiki.errors import GithubWikiError
 from wikiops.providers.github_wiki.redaction import Redactor
+from wikiops.providers.github_wiki.rollback import RollbackIncomplete, RollbackResult
 
 _NO_RESULT = "The backend returned no result for this operation"
 
@@ -77,9 +82,14 @@ def _document_ref(operation: Any) -> DocumentRef | None:
 
 
 def failure_text(error: BaseException) -> str:
-    """The message of an unexpected error: coded ones as they are, others redacted."""
+    """The message of an unexpected error: coded ones as they are, others redacted.
+
+    A ``RollbackIncomplete`` is its cause's text followed by what the rollback left behind.
+    """
     if isinstance(error, GithubWikiError):
         return str(error)
+    if isinstance(error, RollbackIncomplete):
+        return with_note(failure_text(error.cause), error.note)
     detail = Redactor().redact(f"{type(error).__name__}: {error}")
     return f"Unexpected error while applying the operations ({detail})"
 
@@ -88,6 +98,44 @@ def fail_all(operations: Iterable[Any], error: BaseException) -> list[AppliedOpe
     """One FAILED result per operation, in order, all carrying the same error text."""
     message = failure_text(error)
     return [failed(op.operation_id, message, ref=_document_ref(op)) for op in operations]
+
+
+def page_targets(operations: Iterable[Any]) -> frozenset[str]:
+    """The page names the document operations write (those with a valid reference).
+
+    The reference the operation CARRIES, never the one the backend reports: the report is
+    what the provider may refuse, so it cannot decide which file to roll back.
+    """
+    targets: set[str] = set()
+    for operation in operations:
+        ref = _document_ref(operation)
+        if ref is None:
+            continue
+        try:
+            targets.add(layout.validate_page_ref(ref))
+        except GithubWikiError:
+            continue
+    return frozenset(targets)
+
+
+def asset_owner(
+    operation: Any, content: bytes, *, reported: object = None
+) -> Callable[[str], bool]:
+    """Whether a path is the file this asset upload writes.
+
+    Backends store an asset under the content-hashed name of its file name; the path the
+    backend reported (when it did) counts too. Anything else that appeared meanwhile is not
+    this upload's.
+    """
+    try:
+        stored_name: str | None = hashed_asset_name(getattr(operation, "name", None), content)
+    except FsError:
+        stored_name = None  # the backend refuses such an asset before it writes anything
+
+    def owns(path: str) -> bool:
+        return path == reported or (stored_name is not None and PurePosixPath(path).name == stored_name)
+
+    return owns
 
 
 # -- before the backend -------------------------------------------------------------------
@@ -176,16 +224,16 @@ def settle(delegated: Sequence[Any], reply: ApplyResult) -> Settled:
     return Settled(results, tuple(pages), tuple(assets), tuple(rejected))
 
 
-def note_leftovers(settled: Settled, leftovers: Sequence[str]) -> Settled:
-    """Tell, on every rejected operation, which files the rollback could not undo."""
-    if not leftovers:
+def note_rollback(settled: Settled, result: RollbackResult) -> Settled:
+    """Tell, on every rejected operation, what the rollback left in the clone."""
+    if result.clean:
         return settled
-    named = ", ".join(f"'{path}'" for path in leftovers)
-    note = f"the clone still holds {named}: restore or delete it by hand before the next apply"
     results = dict(settled.results)
     for operation_id in settled.rejected:
         item = results[operation_id]
-        results[operation_id] = item.model_copy(update={"message": with_note(item.message, note)})
+        results[operation_id] = item.model_copy(
+            update={"message": with_note(item.message, result.note)}
+        )
     return Settled(results, settled.pages, settled.assets, settled.rejected)
 
 

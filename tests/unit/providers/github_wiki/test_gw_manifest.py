@@ -19,7 +19,9 @@ from wikiops.providers.github_wiki.manifest import (
     MAX_REPORTED_PATHS,
     Classification,
     PendingManifest,
+    StatusEntry,
     parse_status,
+    parse_status_entries,
 )
 from wikiops.providers.github_wiki.workdir import manifest_path
 
@@ -139,6 +141,24 @@ def test_a_trailing_slash_on_anything_but_an_untracked_entry_is_a_coded_git_fail
     with pytest.raises(GithubWikiError) as error:
         parse_status(text)
     assert error.value.code == "sync.git_failed"
+
+
+def test_status_entries_carry_the_two_letter_status_next_to_each_path() -> None:
+    entries = parse_status_entries("?? new.md\0 M Home.md\0R  moved.md\0old.md\0?? nested-repo/\0")
+    assert entries == (
+        StatusEntry("??", "new.md"),
+        StatusEntry(" M", "Home.md"),
+        StatusEntry("R ", "moved.md"),
+        StatusEntry("R ", "old.md"),
+        StatusEntry("??", "nested-repo/"),
+    )
+    assert [entry.untracked for entry in entries] == [True, False, False, False, True]
+    assert [entry.collapsed_directory for entry in entries] == [False, False, False, False, True]
+
+
+def test_parse_status_is_exactly_the_paths_of_the_entries() -> None:
+    text = "?? a.md\0RM b.md\0c.md\0 D d.md\0"
+    assert parse_status(text) == tuple(entry.path for entry in parse_status_entries(text))
 
 
 def test_a_collapsed_directory_is_always_foreign_even_when_the_manifest_lists_files_below_it(

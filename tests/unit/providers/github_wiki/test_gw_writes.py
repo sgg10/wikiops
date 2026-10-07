@@ -14,6 +14,7 @@ from wikiops_sdk.domain import (
 )
 
 from tests.support.write_ops import asset, asset_ref, child, create, ref, update
+from wikiops.providers._fs import hashed_asset_name
 from wikiops.providers.github_wiki import writes
 from wikiops.providers.github_wiki.errors import GithubWikiError
 
@@ -266,3 +267,36 @@ def test_in_order_leaves_out_an_operation_no_source_answered() -> None:
     ordered = writes.in_order([answered, unanswered], {answered.operation_id: result(answered, path="A.md")})
 
     assert [item.operation_id for item in ordered] == [answered.operation_id]
+
+
+# -- what an operation owns (the rollback never goes beyond it) ----------------------------------
+
+
+def test_page_targets_are_the_pages_the_operations_carry_not_what_a_backend_reports() -> None:
+    created, updated, nested, uploaded = create("A.md"), update("B.md", "z"), create("x/y.md"), asset()
+
+    targets = writes.page_targets([created, updated, nested, uploaded])
+
+    assert targets == frozenset({"A.md", "B.md"})  # nested is invalid, an asset has no page
+
+
+def test_page_targets_of_nothing_is_empty() -> None:
+    assert writes.page_targets([]) == frozenset()
+
+
+def test_an_asset_owns_its_content_hashed_name_in_any_directory_and_the_reported_path() -> None:
+    owns = writes.asset_owner(asset("logo.png"), b"bytes", reported="assets/reported.png")
+
+    stored = hashed_asset_name("logo.png", b"bytes")
+    assert owns(f"assets/{stored}") and owns(f"other/{stored}")
+    assert owns("assets/reported.png")
+    assert not owns("assets/logo--0000000000000000.png")  # same stem, other bytes
+    assert not owns("assets/notes.txt")
+
+
+def test_an_asset_without_a_usable_name_owns_only_what_was_reported() -> None:
+    nameless = asset("logo.png").model_copy(update={"name": None})
+    owns = writes.asset_owner(nameless, b"bytes", reported="assets/x.png")
+
+    assert owns("assets/x.png")
+    assert not owns("assets/logo--anything.png")
