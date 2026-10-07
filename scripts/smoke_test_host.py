@@ -11,7 +11,7 @@ from importlib import import_module
 from importlib.metadata import distribution, entry_points, version as distribution_version
 
 
-EXPECTED_PROVIDER_ENTRYPOINTS = ("azure_devops_wiki", "local_files")
+EXPECTED_PROVIDER_ENTRYPOINTS = ("azure_devops_wiki", "local_files", "github_wiki")
 
 
 def parse_args() -> argparse.Namespace:
@@ -43,11 +43,13 @@ def assert_imports() -> None:
     cli_app = import_module("wikiops.cli.app")
     provider_module = import_module("wikiops.providers.azure_devops")
     local_files_module = import_module("wikiops.providers.local_files")
+    github_wiki_module = import_module("wikiops.providers.github_wiki")
 
     assert hasattr(wikiops, "__version__")
     assert cli_app.app is not None
     assert hasattr(provider_module, "AzureDevOpsWikiProviderFactory")
     assert hasattr(local_files_module, "LocalFilesProviderFactory")
+    assert hasattr(github_wiki_module, "GithubWikiProviderFactory")
 
 
 def assert_entry_points() -> None:
