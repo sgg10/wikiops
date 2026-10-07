@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 
 import pytest
 
@@ -198,3 +199,99 @@ def test_render_message_serves_warnings_that_are_never_raised() -> None:
     assert message.startswith("[github_wiki:sync.stale_plan] Plan read the local clone")
     assert "last_sync='2026-01-01T00:00:00Z'" in message
     assert message.endswith(f"Hint: {CODES['sync.stale_plan'].default_hint.rstrip('.')}.")
+
+
+# -- single-line guarantee for user-controlled summary and hint (S3.F1) ------
+
+HOSTILE_TEXTS = [
+    "first\nsecond",
+    "first\r\nsecond",
+    "first\rsecond",
+    "first\n\n\nsecond",
+    "first\vsecond\fthird",
+    "first\x85second",
+    "first\u2028second\u2029third",
+]
+EDGE_LINE_BREAKS = ["trailing newline\n", "\nleading newline", "\r\nboth\r\n"]
+
+
+def assert_single_logical_line(message: str) -> None:
+    assert len(message.splitlines()) == 1, repr(message)
+    assert not any(unicodedata.category(char) == "Cc" for char in message), repr(message)
+    assert MESSAGE_SHAPE.fullmatch(message), repr(message)
+
+
+@pytest.mark.parametrize("text", HOSTILE_TEXTS)
+def test_line_breaks_in_the_summary_are_folded_onto_one_line(text: str) -> None:
+    message = render_message("auth.rejected", text, hint="fix it")
+
+    assert_single_logical_line(message)
+    assert " | " in message
+    assert message.startswith("[github_wiki:auth.rejected] ")
+
+
+@pytest.mark.parametrize("text", HOSTILE_TEXTS)
+def test_line_breaks_in_the_hint_are_folded_onto_one_line(text: str) -> None:
+    message = render_message("auth.rejected", "Rejected", hint=text)
+
+    assert_single_logical_line(message)
+    assert "Hint: " in message
+
+
+@pytest.mark.parametrize("text", EDGE_LINE_BREAKS)
+def test_line_breaks_at_the_edges_are_trimmed_not_folded(text: str) -> None:
+    summary = render_message("auth.rejected", text, hint="fix it")
+    hint = render_message("auth.rejected", "Rejected", hint=text)
+
+    for message in (summary, hint):
+        assert_single_logical_line(message)
+        assert " | " not in message
+
+
+def test_summary_folding_keeps_the_surrounding_text_in_order() -> None:
+    message = render_message("auth.rejected", "Unknown setting 'a\nb'", hint="fix\r\nit")
+
+    assert message == (
+        "[github_wiki:auth.rejected] Unknown setting 'a | b'. Hint: fix | it."
+    )
+
+
+@pytest.mark.parametrize(
+    ("raw", "escaped"),
+    [
+        ("tab\there", "tab\\there"),
+        ("esc\x1b[31mred", "esc\\x1b[31mred"),
+        ("nul\x00byte", "nul\\x00byte"),
+        ("del\x7fchar", "del\\x7fchar"),
+    ],
+    ids=["tab", "ansi-escape", "nul", "del"],
+)
+def test_other_control_characters_are_escaped_in_summary_hint_and_context(
+    raw: str, escaped: str
+) -> None:
+    message = render_message(
+        "auth.rejected", f"Rejected {raw}", context={"value": raw}, hint=f"try {raw}"
+    )
+
+    assert_single_logical_line(message)
+    assert f"Rejected {escaped}." in message
+    assert f"value='{escaped}'" in message
+    assert f"Hint: try {escaped}." in message
+
+
+def test_the_error_class_exposes_the_folded_message_and_the_raw_parts() -> None:
+    error = GithubWikiError("auth.rejected", "bad\ninput", hint="do\nthis")
+
+    assert_single_logical_line(str(error))
+    assert error.summary == "bad\ninput"
+    assert error.hint == "do\nthis"
+
+
+def test_folding_never_changes_an_already_clean_message() -> None:
+    message = render_message(
+        "sync.diverged", "Histories diverged", context={"workdir": "/w"}, hint="reconcile"
+    )
+
+    assert message == (
+        "[github_wiki:sync.diverged] Histories diverged. workdir='/w'. Hint: reconcile."
+    )

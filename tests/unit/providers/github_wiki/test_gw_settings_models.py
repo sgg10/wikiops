@@ -260,3 +260,77 @@ def test_explicit_null_branch_and_key_path_mean_auto_detect_and_unpinned() -> No
 
     assert settings.branch is None
     assert settings.auth.key_path is None
+
+
+# -- hardening from the S1 review (S3.F2, S3.F3) ---------------------------
+
+
+@pytest.mark.parametrize("name", ["", " ", "   ", "\t", " \t "])
+def test_bot_identity_rejects_an_empty_or_whitespace_only_name(name: str) -> None:
+    with pytest.raises(ValidationError):
+        build(commit={"identity": {"mode": "bot", "name": name}})
+
+
+@pytest.mark.parametrize("name", ["X", "wiki bot", "  padded  "])
+def test_bot_identity_accepts_any_name_with_a_visible_character(name: str) -> None:
+    identity = build(commit={"identity": {"mode": "bot", "name": name}}).commit.identity
+
+    assert identity.name == name
+
+
+@pytest.mark.parametrize(
+    "account",
+    ["sgg10", "a", "A1", "octo-cat", "a-b-c", "octocat_acme", "9lives", "a" * 39],
+)
+def test_gh_account_accepts_github_login_shapes(account: str) -> None:
+    assert build(auth={"mode": "gh", "account": account}).auth.account == account
+
+
+@pytest.mark.parametrize(
+    "account",
+    [
+        "-evil",
+        "--hostname",
+        "-oProxyCommand=x",
+        "_leading",
+        "a b",
+        " a",
+        "a ",
+        "a\nb",
+        "a\tb",
+        "a\x00b",
+        "a\x1bb",
+        "a;b",
+        "a/b",
+        "a=b",
+        "$(id)",
+        "ünï",
+        "a" * 40,
+        "",
+    ],
+    ids=[
+        "leading-dash",
+        "option-lookalike",
+        "option-with-value",
+        "leading-underscore",
+        "inner-space",
+        "leading-space",
+        "trailing-space",
+        "newline",
+        "tab",
+        "nul",
+        "escape",
+        "semicolon",
+        "slash",
+        "equals",
+        "substitution",
+        "non-ascii",
+        "too-long",
+        "empty",
+    ],
+)
+def test_gh_account_rejects_anything_that_is_not_a_github_login(account: str) -> None:
+    with pytest.raises(ValidationError) as caught:
+        build(auth={"mode": "gh", "account": account})
+
+    assert caught.value.errors()[0]["loc"] == ("auth", "gh", "account")

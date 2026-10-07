@@ -236,3 +236,71 @@ def test_a_location_below_a_non_model_field_has_no_owner_and_a_generic_hint() ->
 
     assert (path, owner, field) == ("workdir.nested.key", None, None)
     assert _valid_keys(owner) == "see the provider reference for the valid settings"
+
+
+# -- user-controlled text never breaks the single-line contract (S3.F1) ------
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        make(**{"bad\nkey": 1}),
+        make(**{"bad\r\nkey": 1}),
+        make(auth={"mode": "oauth\nHint: injected."}),
+        make(auth={"mode": "x\r\ny"}),
+        make(commit={"identity": {"mode": "a\nb"}}),
+        make(auth={"mode": "ambient", "evil\nkey": 1}),
+        make(auth={"mode": "env", "variable": "A\nB"}),
+    ],
+    ids=[
+        "unknown-key-lf",
+        "unknown-key-crlf",
+        "union-tag-lf",
+        "union-tag-crlf",
+        "identity-tag",
+        "nested-unknown-key",
+        "env-variable",
+    ],
+)
+def test_injected_line_breaks_in_user_input_never_split_the_message(raw: Any) -> None:
+    error = failure(raw)
+
+    assert error.code == "config.invalid"
+    assert len(str(error).splitlines()) == 1, repr(str(error))
+    assert MESSAGE_SHAPE.fullmatch(str(error)), repr(str(error))
+
+
+def test_an_injected_hint_marker_stays_inside_the_quoted_summary() -> None:
+    error = failure(make(auth={"mode": "oauth\nHint: injected."}))
+
+    assert "oauth | Hint: injected" in str(error)
+    assert str(error).endswith("env | gh | ssh | ambient.")
+
+
+# -- hardening from the S1 review (S3.F2, S3.F3) ---------------------------
+
+
+@pytest.mark.parametrize("name", ["", "   ", "\t"], ids=["empty", "spaces", "tab"])
+def test_blank_bot_name_is_identity_incomplete_with_a_bot_specific_hint(name: str) -> None:
+    error = failure(make(commit={"identity": {"mode": "bot", "name": name}}))
+
+    assert error.code == "config.identity_incomplete"
+    assert "bot" in str(error)
+    assert "custom" not in error.hint
+    assert MESSAGE_SHAPE.fullmatch(str(error))
+
+
+@pytest.mark.parametrize(
+    "account",
+    ["-evil", "--hostname", "a b", "a\nb", "a\x00b", "a" * 40],
+    ids=["dash", "option", "space", "newline", "nul", "too-long"],
+)
+def test_invalid_gh_account_is_config_invalid_naming_the_setting(account: str) -> None:
+    error = failure(make(auth={"mode": "gh", "account": account}))
+
+    assert error.code == "config.invalid"
+    assert "Invalid value for setting 'auth.account'" in str(error)
+    assert "GitHub login" in str(error)
+    assert account not in str(error)
+    assert MESSAGE_SHAPE.fullmatch(str(error)), repr(str(error))
+    assert len(str(error).splitlines()) == 1

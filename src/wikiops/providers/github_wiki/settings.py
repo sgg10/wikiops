@@ -27,6 +27,9 @@ from wikiops.providers.github_wiki.errors import GithubWikiError
 from wikiops_sdk.contracts import ProviderSettings
 
 _ENV_VARIABLE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# GitHub login: alphanumeric first character (never '-', which gh would read as
+# an option), then letters, digits, '-' and '_' (Enterprise Managed Users).
+_GITHUB_LOGIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,38}")
 _EMAIL = re.compile(r"[^@\s<>]+@[^@\s<>]+")
 _REPOSITORY = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+")
 _HOST_LABEL = r"(?!-)[A-Za-z0-9-]{1,63}(?<!-)"
@@ -95,6 +98,16 @@ class GhAuth(_Strict):
     mode: Literal["gh"]
     account: str = Field(..., min_length=1)
 
+    @field_validator("account")
+    @classmethod
+    def _valid_login(cls, value: str) -> str:
+        if not _GITHUB_LOGIN.fullmatch(value):
+            raise ValueError(
+                "account must be a GitHub login: up to 39 letters, digits, '-' or '_', "
+                "starting with a letter or digit"
+            )
+        return value
+
 
 class SshAuth(_Strict):
     """SSH remote; ``key_path`` optionally pins one identity file."""
@@ -131,6 +144,16 @@ def _ident_name(value: str) -> str:
     return value
 
 
+def _non_blank_ident_name(value: str, *, mode: str, hint: str | None = None) -> str:
+    if not value.strip():
+        raise CodedValueError(
+            "config.identity_incomplete",
+            f"commit.identity mode '{mode}' needs a non-blank 'name'",
+            hint=hint,
+        )
+    return _ident_name(value)
+
+
 def _ident_email(value: str) -> str:
     if not _EMAIL.fullmatch(value):
         raise ValueError("email must look like 'user@host'")
@@ -147,10 +170,18 @@ class BotIdentity(_Strict):
     """Commit as a bot; defaults to ``wikiops <wikiops@users.noreply.github.com>``."""
 
     mode: Literal["bot"]
-    name: str = Field(_BOT_NAME, min_length=1)
+    name: str = _BOT_NAME
     email: str = _BOT_EMAIL
 
-    _check_name = field_validator("name")(_ident_name)
+    @field_validator("name")
+    @classmethod
+    def _non_blank_name(cls, value: str) -> str:
+        return _non_blank_ident_name(
+            value,
+            mode="bot",
+            hint="set a non-blank commit.identity.name, or omit it to use 'wikiops'",
+        )
+
     _check_email = field_validator("email")(_ident_email)
 
 
@@ -164,12 +195,7 @@ class CustomIdentity(_Strict):
     @field_validator("name")
     @classmethod
     def _non_blank_name(cls, value: str) -> str:
-        if not value.strip():
-            raise CodedValueError(
-                "config.identity_incomplete",
-                "commit.identity mode 'custom' needs a non-blank 'name'",
-            )
-        return _ident_name(value)
+        return _non_blank_ident_name(value, mode="custom")
 
     _check_email = field_validator("email")(_ident_email)
 

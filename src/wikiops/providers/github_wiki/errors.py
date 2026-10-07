@@ -20,7 +20,10 @@ from wikiops.core.exceptions import ConfigurationError
 
 NAMESPACE = "github_wiki"
 
-_LINE_BREAKS = re.compile(r"\s*(?:\r\n|\r|\n)+\s*")
+# Every character ``str.splitlines`` treats as a line boundary, with the
+# whitespace around it, folds into one separator.
+_LINE_BREAKS = re.compile(r"\s*(?:\r\n|[\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029])+\s*")
+_CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
 @dataclass(frozen=True)
@@ -151,8 +154,14 @@ CODES: dict[str, CodeSpec] = {
 }
 
 
+def _escape_control(match: re.Match[str]) -> str:
+    return match.group().encode("unicode_escape").decode("ascii")
+
+
 def _one_line(value: object) -> str:
-    return _LINE_BREAKS.sub(" | ", str(value).strip())
+    """Fold line breaks to `` | `` and escape any remaining control character."""
+    folded = _LINE_BREAKS.sub(" | ", str(value).strip())
+    return _CONTROL_CHARACTERS.sub(_escape_control, folded)
 
 
 def render_message(
@@ -164,13 +173,15 @@ def render_message(
 ) -> str:
     """Render ``[github_wiki:<code>] <summary>. k='v'... Hint: <action>.``.
 
-    Context entries whose value is ``None`` are skipped and multi-line values
-    are folded onto one line, so the first logical message stays a single line.
+    Context entries whose value is ``None`` are skipped. Summary, hint and
+    context values may carry user-controlled text, so each is folded onto one
+    line and stripped of control characters: the first logical message always
+    stays a single line.
     """
     spec = CODES.get(code)
     if spec is None:
         raise ValueError(f"Unknown {NAMESPACE} error code '{code}'")
-    parts = [f"[{NAMESPACE}:{code}] {summary.strip().rstrip('.')}."]
+    parts = [f"[{NAMESPACE}:{code}] {_one_line(summary).rstrip('.')}."]
     pairs = [
         f"{key}='{_one_line(value)}'"
         for key, value in (context or {}).items()
@@ -178,7 +189,7 @@ def render_message(
     ]
     if pairs:
         parts.append(" ".join(pairs) + ".")
-    parts.append(f"Hint: {(hint or spec.default_hint).strip().rstrip('.')}.")
+    parts.append(f"Hint: {_one_line(hint or spec.default_hint).rstrip('.')}.")
     return " ".join(parts)
 
 
