@@ -4,7 +4,7 @@ These are runtime facts the agent should keep in mind.
 
 ## 1. The host ships no built-in plugins
 
-`wikiops` includes the CLI and the built-in providers (Azure DevOps Wiki and local files), but not business plugins.
+`wikiops` includes the CLI and the built-in providers (Azure DevOps Wiki, local files and GitHub wiki), but not business plugins.
 
 Always verify plugin availability with:
 
@@ -99,9 +99,9 @@ poetry run wikiops ...
 
 ## 13. Read the `provider_target` note before `--apply`
 
-Providers that can describe their target, such as `local_files`, add a `provider_target` note as the first entry of `ChangeSet.notes`. It shows the resolved root and the working directory. A relative `root` resolves against the directory the command is launched from, so the same config can write to a different place from a different directory.
+Providers that can describe their target, such as `local_files` and `github_wiki`, add a `provider_target` note as the first entry of `ChangeSet.notes`. It shows the resolved root and the working directory. A relative `root` resolves against the directory the command is launched from, so the same config can write to a different place from a different directory.
 
-Before `--apply`, confirm `root=` is the directory the user intended. If a `provider_target_unavailable` warning appears instead, the target could not be confirmed.
+Before `--apply`, confirm `root=` (or, for `github_wiki`, `remote=` and `workdir=`) is the target the user intended. If a `provider_target_unavailable` warning appears instead, the target could not be confirmed.
 
 ## 14. `local_files` paths are root-relative and end in `.md`
 
@@ -114,3 +114,11 @@ The diff covers updates. A create conflict (`conflict.exists`) only appears when
 ## 16. `resolved_asset_reference` is not what a `local_files` document contains
 
 With `local_files`, `=== APPLY RESULT ===` shows the generic `/assets/...` reference for an uploaded asset, while the written Markdown files contain links relative to each document. Verify links by reading the file with `wikiops docs get`.
+
+## 17. `github_wiki` commits locally by default and pages are flat
+
+`allow_auto_commit` defaults to `true` and `allow_auto_push` to `false`: an apply commits in the local clone and publishes nothing, and each result says `not pushed`. Tell the user the wiki is not updated on GitHub until the commits are pushed (by enabling `allow_auto_push` at the user's request, or by pushing the clone). If the wiki is edited in the web UI meanwhile, the next run reports `sync.diverged`. Pages are flat root files such as `Home.md`; a path with `/` fails with `path.nested_not_supported` and is never flattened automatically. See [GitHub wiki provider reference](github-wiki-provider.md).
+
+## 18. `github_wiki` needs a first page and a clean clone
+
+An uninitialized wiki fails with `wiki.not_initialized`: the user must create the first page in the web UI. Foreign changes in the clone fail with `workdir.dirty`, and a concurrent run fails with `workdir.locked`. Never discard the user's changes, delete the manifest or lock, or switch `workdir` to get past these without asking.

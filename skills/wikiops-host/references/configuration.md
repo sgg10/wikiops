@@ -33,7 +33,7 @@ Rules:
 - the provider key, such as `azdo`, becomes the runtime `provider_name`
 - all fields except `type` become provider settings
 
-Provider types are discovered at runtime; confirm them with `wikiops providers`. The built-in types are `azure_devops_wiki` and `local_files`.
+Provider types are discovered at runtime; confirm them with `wikiops providers`. The built-in types are `azure_devops_wiki`, `local_files` and `github_wiki`.
 
 Example for the built-in `local_files` provider:
 
@@ -52,6 +52,29 @@ Rules for `local_files`:
 - ref paths for this provider are relative to `root`, have no leading `/`, and end in `.md` (for example `guide/README.md`)
 - unknown settings keys are rejected
 - see [Local files provider reference](local-files-provider.md) before configuring or debugging it
+
+Example for the built-in `github_wiki` provider:
+
+```yaml
+providers:
+  wiki:
+    type: github_wiki
+    repository: acme/platform
+    auth:
+      mode: env
+      variable: GITHUB_TOKEN
+    allow_auto_commit: true
+    allow_auto_push: false
+```
+
+Rules for `github_wiki`:
+
+- `repository` (`owner/repo`) is required; `auth.mode` is one of `env`, `gh`, `ssh`, `ambient` (default) and `env` takes the variable name, never the token
+- the provider works through a local clone: a relative `workdir` resolves against the working directory of the command, and the default is a per-profile directory in the user cache
+- ref paths are flat root pages that end in `.md` (for example `Home.md`); a path with `/` is rejected
+- `allow_auto_commit` defaults to `true` and `allow_auto_push` to `false`, so a run commits locally but does not publish
+- unknown settings keys are rejected
+- see [GitHub wiki provider reference](github-wiki-provider.md) before configuring or debugging it
 
 ## `profiles`
 
@@ -127,6 +150,7 @@ See:
 
 - [Azure DevOps config example](../assets/config.azure-devops.example.yaml)
 - [Local files config example](../assets/config.local-files.example.yaml)
+- [GitHub wiki config example](../assets/config.github-wiki.example.yaml)
 
 ## Practical guidance for agents
 

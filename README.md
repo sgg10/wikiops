@@ -11,7 +11,7 @@ It orchestrates documentation automation workflows around `wikiops-sdk` by loadi
 - Runtime loading for plugins and providers through Python entry points.
 - YAML configuration loading for providers, profiles, refs, and plugin config.
 - Document loading, diff rendering, and apply delegation.
-- Built-in providers for Azure DevOps Wiki and for local Markdown files.
+- Built-in providers for Azure DevOps Wiki, for local Markdown files, and for GitHub wikis.
 - A strict `pytest` suite with coverage enforcement.
 
 ## What This Repository Does Not Contain
@@ -67,6 +67,7 @@ The host currently ships with these built-in provider implementations:
 
 - `azure_devops_wiki`
 - `local_files`
+- `github_wiki`
 
 Plugins are expected to be installed separately through Python packages that expose the `wikiops.plugins` entry point group.
 
@@ -116,6 +117,31 @@ profiles:
 ```
 
 A relative `root` resolves against the current working directory. Plans include a `provider_target` note with the resolved root; read it before applying. See [`docs/reference/local-files.md`](docs/reference/local-files.md).
+
+To publish pages to the wiki of a GitHub repository, use the `github_wiki` provider. It works through a local git clone, commits what a run wrote, and pushes only when you enable it. Pages are flat (`Home.md`, never `guides/setup.md`):
+
+```yaml
+providers:
+  wiki:
+    type: github_wiki
+    repository: acme/platform
+    auth:
+      mode: env
+      variable: GITHUB_TOKEN
+    allow_auto_push: false
+
+profiles:
+  default:
+    provider: wiki
+    refs:
+      home:
+        provider: wiki
+        kind: path
+        locator:
+          path: Home.md
+```
+
+The wiki needs its first page created in the web UI. Plans include a `provider_target` note with the remote and the clone directory; read it before applying. See [`docs/reference/github-wiki.md`](docs/reference/github-wiki.md).
 
 ### Example Input
 
@@ -177,6 +203,7 @@ Start here depending on your role:
 - Need module-level runtime reference: [`docs/reference/core-modules.md`](docs/reference/core-modules.md)
 - Need the built-in Azure DevOps provider reference: [`docs/reference/azure-devops-wiki.md`](docs/reference/azure-devops-wiki.md)
 - Need the built-in local files provider reference: [`docs/reference/local-files.md`](docs/reference/local-files.md)
+- Need the built-in GitHub wiki provider reference: [`docs/reference/github-wiki.md`](docs/reference/github-wiki.md)
 - Need host internal boundaries: [`docs/reference/internal-boundaries.md`](docs/reference/internal-boundaries.md)
 
 The full host documentation index lives at [`docs/index.md`](docs/index.md).

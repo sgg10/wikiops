@@ -1,7 +1,7 @@
 ---
 name: wikiops-host
-description: Use this skill when the user wants to configure or operate the WikiOps host in natural language: inspect installed plugins or providers, create or update a WikiOps YAML config, configure the built-in Azure DevOps Wiki or local files provider, read the current content of a page with `wikiops docs get`, or execute a plugin with an input YAML through `wikiops run` in plan or apply mode. If a companion plugin skill exists, use it for plugin-specific input or business rules, then return to this skill for host execution and verification.
-compatibility: Requires a shell with the `wikiops` CLI available directly or through `poetry run wikiops`. Azure DevOps flows require `AZDO_PAT` or the configured PAT env var.
+description: Use this skill when the user wants to configure or operate the WikiOps host in natural language: inspect installed plugins or providers, create or update a WikiOps YAML config, configure the built-in Azure DevOps Wiki, local files or GitHub wiki provider, read the current content of a page with `wikiops docs get`, or execute a plugin with an input YAML through `wikiops run` in plan or apply mode. If a companion plugin skill exists, use it for plugin-specific input or business rules, then return to this skill for host execution and verification.
+compatibility: Requires a shell with the `wikiops` CLI available directly or through `poetry run wikiops`. Azure DevOps flows require `AZDO_PAT` or the configured PAT env var. GitHub wiki flows require `git` and the credentials of the chosen auth mode.
 metadata:
   author: sgg10
   scope: host-runtime
@@ -19,6 +19,7 @@ Use this skill when the user wants help with the WikiOps host runtime itself:
 - inspect installed plugins or providers
 - configure the built-in `azure_devops_wiki` provider
 - configure the built-in `local_files` provider (Markdown files in a local directory)
+- configure the built-in `github_wiki` provider (pages of a GitHub repository wiki, published through a local git clone)
 - read the current content of an existing page
 - run a plugin with an input YAML
 - plan changes first, then optionally apply them
@@ -105,6 +106,10 @@ For the built-in local files provider, including how to react to each `[local_fi
 
 - [Local files provider reference](references/local-files-provider.md)
 
+For the built-in GitHub wiki provider, including auth modes, the clone and commit/push behavior, and how to react to each `[github_wiki:<code>]` error, read:
+
+- [GitHub wiki provider reference](references/github-wiki-provider.md)
+
 For end-to-end workflows, read:
 
 - [Host workflows](references/workflows.md)
@@ -126,6 +131,7 @@ For pitfalls and runtime constraints, read:
 - Do not assume which providers are installed; verify with `wikiops providers`
 - Before `wikiops run --apply`, read the `provider_target` note in the plan output (when present) and confirm the resolved root and working directory are the ones the user intends; a `provider_target_unavailable` warning means the target could not be confirmed
 - For `local_files` failures, read the `Hint:` in the `[local_files:<code>]` message and follow [Local files provider reference](references/local-files-provider.md); never change `overwrite_existing` or `root` on your own to get past an error
+- For `github_wiki` failures, read the `Hint:` in the `[github_wiki:<code>]` message and follow [GitHub wiki provider reference](references/github-wiki-provider.md); never put a token in the config, never enable `allow_auto_push` or change `workdir`, `branch`, or `auth` on your own to get past an error, and tell the user when a run only committed locally (the wiki is not published until pushed)
 - If the Azure DevOps PAT env var is missing, stop and ask the user to provide or export it
 - If the workflow uses local assets, ensure the plugin config allows the asset roots or intentionally disables that protection
 - Do not start post-run verification reads before `wikiops run --apply` has fully finished
@@ -170,6 +176,7 @@ When the user asks for a plugin-driven documentation update:
 - "Ejecuta el plugin `nequi.datamind` con este input yaml"
 - "Crea o actualiza mi `config.yaml` para que use el provider de Azure DevOps"
 - "Configura WikiOps para escribir la documentación como archivos Markdown en la carpeta `./docs`"
+- "Configura WikiOps para publicar la documentación en la wiki de GitHub del repositorio acme/platform"
 - "Dado que ya existe una página, lee su contenido actual y luego corre WikiOps con el input que produzca la skill del plugin"
 
 ## Validation loop
@@ -187,10 +194,12 @@ When the user asks for a plugin-driven documentation update:
 - [Configuration reference](references/configuration.md)
 - [Azure DevOps provider reference](references/azure-devops-provider.md)
 - [Local files provider reference](references/local-files-provider.md)
+- [GitHub wiki provider reference](references/github-wiki-provider.md)
 - [Host workflows](references/workflows.md)
 - [Gotchas](references/gotchas.md)
 - [Azure DevOps config example](assets/config.azure-devops.example.yaml)
 - [Local files config example](assets/config.local-files.example.yaml)
+- [GitHub wiki config example](assets/config.github-wiki.example.yaml)
 - [Activation eval queries](assets/eval-queries.json)
 
 ## Design note

@@ -57,6 +57,7 @@ The current host ships with:
 - the default documentation orchestrator
 - the built-in `azure_devops_wiki` provider factory
 - the built-in `local_files` provider factory (see [Local Files Provider](reference/local-files.md))
+- the built-in `github_wiki` provider factory (see [GitHub Wiki Provider](reference/github-wiki.md))
 
 The current host does not ship with built-in plugins. Plugins are expected to be installed separately and discovered through the `wikiops.plugins` entry point group.
 

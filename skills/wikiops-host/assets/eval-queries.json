@@ -40,6 +40,18 @@
     "should_trigger": true
   },
   {
+    "query": "Configura wikiops con el provider github_wiki para publicar las páginas en la wiki del repositorio acme/platform",
+    "should_trigger": true
+  },
+  {
+    "query": "wikiops apply failed with [github_wiki:workdir.dirty]; help me understand what to do before I rerun it",
+    "should_trigger": true
+  },
+  {
+    "query": "My wikiops github_wiki run says committed locally but not pushed; how do I publish the wiki?",
+    "should_trigger": true
+  },
+  {
     "query": "Necesito diseñar el contrato DocumentProvider del SDK",
     "should_trigger": false
   },
