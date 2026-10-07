@@ -160,6 +160,30 @@ class Git:
             )
         return result
 
+    def ignored_paths(self, paths: Sequence[str]) -> tuple[str, ...]:
+        """Which of ``paths`` an ignore rule (``.gitignore``, ``info/exclude``, ...) hides.
+
+        Names are literal (read from stdin, NUL-separated, so no pathspec magic and no
+        quoting applies) and the answer keeps the order given. A path git already tracks
+        is never ignored (no ``--no-index``: a clean, tracked page that happens to match a
+        pattern is an ordinary page); only untracked paths can be hidden, which is exactly
+        what ``git status`` omits and ``git add`` refuses.
+        """
+        if not paths:
+            return ()
+        result = self.local(
+            "check-ignore", "--stdin", "-z", stdin="".join(f"{path}\0" for path in paths), check=False
+        )
+        if result.timed_out or result.returncode not in (0, 1):  # 1: none of them is ignored
+            raise classify(
+                "check-ignore",
+                result,
+                redactor=Redactor(),
+                context={"workdir": str(self._workdir)},
+            )
+        found = {entry for entry in result.stdout.split("\0") if entry}
+        return tuple(path for path in paths if path in found)
+
     # -- network commands ----------------------------------------------------
 
     def ls_remote(self, *, context: Mapping[str, object] | None = None) -> CommandResult:

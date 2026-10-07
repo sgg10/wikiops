@@ -238,6 +238,8 @@ class GithubWikiProvider:
             reported = asset.ref.locator.get("path")
             try:
                 layout.build_asset_reference(asset.ref)
+                if self._git_facade().ignored_paths([reported]):
+                    raise writes.ignored_error([reported], workdir=self._resolved_workdir())
                 sync.manifest.record([reported])
             except Exception as error:  # noqa: BLE001 - the backend already wrote the file
                 self._fail_after_write(
@@ -361,6 +363,7 @@ class GithubWikiProvider:
             page_count=len(settled.pages),
             unpushed=sync.unpushed_commits() if settings.allow_auto_push else 0,
         )
+        results = writes.fail_ignored(results, outcome.ignored, workdir=outcome.workdir)
         return writes.annotate(results, note=outcome.note, error=outcome.error)
 
     # -- host hook ---------------------------------------------------------------------

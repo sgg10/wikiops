@@ -46,7 +46,8 @@ Check `remote=`, `workdir=`, `auto_commit=` and `auto_push=` before running `--a
 - Apply makes at most one commit containing exactly the files it wrote plus its own earlier pending files. Identical content makes no commit. Local git hooks (for example `pre-commit`) run on the commit; network commands run with hooks disabled.
 - With `allow_auto_push: false` (default) commits stay local. Each result says `committed locally at <sha> in '<workdir>'; not pushed`. Tell the user the wiki is not published yet. If the wiki is edited in the web UI meanwhile, the next run reports `sync.diverged`.
 - With `allow_auto_commit: false` pages are only written to the clone and stay pending.
-- A page the provider rejects after the backend wrote it is rolled back; the clone stays clean for the next run.
+- A page the provider rejects after the backend wrote it is rolled back, confined to the paths that operation wrote (found by a `git status` snapshot taken before the write). Any other new path in the clone is left untouched and reported as foreign, and leftovers the rollback could not restore are named in the failed result; read them before re-running.
+- Apply decides from `git status`: pages identical to HEAD stage and commit nothing. A page or asset a `.gitignore` or `.git/info/exclude` rule hides is never committed silently: its operation fails with `commit.failed`, names the path and says it is ignored by git. Remove the ignore rule or rename the page; the other pages of the apply are still committed.
 - Assets are stored under `assets_dir` and linked document-relative (`assets/x--<hash>.png`); root-anchored links and `raw.githubusercontent.com` URLs are refused. An asset upload alone never commits.
 - Concurrent runs on one clone fail fast with `workdir.locked`; do not run two applies against the same `workdir`.
 - The first wiki page must exist already (created in the web UI); the provider cannot create an empty wiki.
@@ -119,7 +120,7 @@ Match the code with `^\[(?P<ns>[a-z_]+):(?P<code>[a-z_]+(\.[a-z_]+)*)\]`, then r
 | Code | How to react |
 | --- | --- |
 | `commit.identity_missing` | git has no `user.name`/`user.email`. Ask the user to configure them or choose `commit.identity` mode `bot` or `custom`. |
-| `commit.failed` | `git add`/`git commit` failed (often a hook). The pages are written but not committed and stay pending; fix the cause and re-run. |
+| `commit.failed` | `git add`/`git commit` failed (often a hook). The pages are written but not committed and stay pending; fix the cause and re-run. A message saying the path is ignored by git means a `.gitignore` or `info/exclude` rule hides it: remove the rule or rename the page. |
 | `push.rejected` | The remote advanced after the sync. The local commit is kept. Tell the user to reconcile in the workdir; the next run reports `sync.diverged` until they do. |
 | `push.failed` | The push failed for another reason. Read the redacted output; the local commit is kept. |
 

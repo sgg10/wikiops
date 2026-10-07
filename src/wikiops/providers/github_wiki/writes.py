@@ -11,6 +11,7 @@ forward blindly:
   and ``resolved_asset_ref`` of APPLIED results), re-validates those paths and guards
   the reference string the backend reports. Files the backend wrote without reporting
   them are never part of the written set, so they can never be staged.
+* ``fail_ignored`` and ``ignored_error`` turn a write that git ignores into a loud failure.
 * ``annotate`` maps what publishing did (a note, or a coded error) onto the results.
 * ``page_targets`` and ``asset_owner`` say which paths an operation is the one to write,
   which is all the rollback may touch if it has to undo that operation.
@@ -259,6 +260,55 @@ def with_note(message: str | None, note: str) -> str:
     if not base:
         return note
     return f"{base} {note}" if base.endswith(".") else f"{base}; {note}"
+
+
+def ignored_error(paths: Iterable[str], *, workdir: object) -> GithubWikiError:
+    """``commit.failed`` for paths the backend wrote and an ignore rule hides from git.
+
+    ``git status`` never lists them, so they would be neither staged nor committed: that
+    must be said, never skipped silently.
+    """
+    named = ", ".join(f"'{path}'" for path in paths)
+    return GithubWikiError(
+        "commit.failed",
+        f"{named} was written but is ignored by git (.gitignore or .git/info/exclude), "
+        "so it was not committed",
+        context={"workdir": str(workdir)},
+        hint="remove the ignore rule or rename the page",
+    )
+
+
+def _written_paths(item: AppliedOperationResult) -> set[str]:
+    """The repo-relative paths an APPLIED result reports (already validated by ``settle``)."""
+    if item.status is not OperationStatus.APPLIED:
+        return set()
+    paths: set[str] = set()
+    if item.resolved_ref is not None:
+        paths.add(layout.validate_page_ref(item.resolved_ref))
+    if item.resolved_asset_ref is not None:
+        paths.add(item.resolved_asset_ref.locator["path"])
+    return paths
+
+
+def fail_ignored(
+    results: list[AppliedOperationResult], ignored: Sequence[str], *, workdir: object
+) -> list[AppliedOperationResult]:
+    """Fail every APPLIED result that wrote an ignored path; the others stay as they are."""
+    if not ignored:
+        return results
+    hidden = set(ignored)
+    failed_results: list[AppliedOperationResult] = []
+    for item in results:
+        mine = sorted(_written_paths(item) & hidden)
+        if mine:
+            item = item.model_copy(
+                update={
+                    "status": OperationStatus.FAILED,
+                    "message": str(ignored_error(mine, workdir=workdir)),
+                }
+            )
+        failed_results.append(item)
+    return failed_results
 
 
 def annotate(

@@ -151,7 +151,9 @@ State files live inside `.git`, so they are never versioned and never show up in
 | `<git dir>/wikiops/pending.json` | Pending manifest: `{"version": 1, "paths": {"<path>": "sha256:<hex>"}}`, written atomically. Kept in both `allow_auto_commit` modes. An unreadable or invalid manifest is `workdir.manifest_corrupt`; delete it as the message says (its former paths are then treated as foreign) |
 | `<git dir>/wikiops/lock` | Advisory OS lock of the clone. A run holds it for its whole sequence and never waits: a concurrent run fails at once with `workdir.locked`, naming the holder's pid, host, start time, and purpose. The OS drops the lock when its holder dies, so a killed run never leaves a stale lock |
 
-An operation the provider rejects after the backend already wrote its file (for example a reported reference that breaks the page policy) is rolled back under the lock: a tracked file is restored from HEAD and a newly created file is removed, so the next run is not blocked by wikiops' own leftovers. Files that were already pending are never touched. If a file cannot be restored, the failed result names it.
+An operation the provider rejects after the backend already wrote its file (for example a reported reference that breaks the page policy) is rolled back under the lock, but only for the paths **that operation wrote**. Right before delegating to the backend the provider takes a `git status` snapshot; after a rejection it touches only a path that appeared since the snapshot and that the rejected operation targets (the page it carried, or the content-hashed asset file): a tracked file is restored from HEAD and an untracked one is removed. Any other new path, such as a file a user created in the clone while the run held the lock, is left untouched and reported as foreign (`left untouched: ... not part of it`). Paths that were already pending are never touched. Whatever the rollback could not restore or chose to leave is named in the failed result.
+
+Publishing decides from `git status` before it stages anything: an apply whose pages are identical to HEAD stages nothing, makes no commit, and never needs the commit template. A written page or asset that a `.gitignore` or `.git/info/exclude` rule in the wiki repository hides from git would never be committed, so its operation fails with `commit.failed`, naming the path and saying it is ignored by git, with the hint to remove the ignore rule or rename the page. The other pages of the same apply are still committed.
 
 ## Pages: A Flat Namespace
 
@@ -293,7 +295,7 @@ Failures during apply appear as `FAILED` entries in `=== APPLY RESULT ===`; the 
 | `link.root_anchored` | A reported link starts with `/` | Use a document-relative link |
 | `link.raw_url` | A reported link is a `raw.githubusercontent.com` URL | Use a relative link |
 | `commit.identity_missing` | git has no `user.name`/`user.email` | Configure them or use `bot`/`custom` identity |
-| `commit.failed` | `git add` or `git commit` failed (for example a hook) | Inspect the workdir; the paths stay pending |
+| `commit.failed` | `git add` or `git commit` failed (for example a hook), or a written path is ignored by git | Inspect the workdir; the paths stay pending |
 | `push.rejected` | The remote advanced since the sync | Reconcile in the workdir, then re-run |
 | `push.failed` | The push failed for another reason | Inspect the push output and the local commit |
 

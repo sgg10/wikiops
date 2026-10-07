@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.fake_wiki_git import subcommand_and_args
 from tests.support.publisher_harness import PublisherHarness, build_publisher
 from wikiops.providers.github_wiki.errors import GithubWikiError
 from wikiops.providers.github_wiki.publisher import Publisher, render_commit_message
@@ -160,6 +161,81 @@ def test_a_changed_page_is_committed_where_an_unchanged_one_is_not(wiki: Publish
 
     assert outcome.committed is True
     assert wiki.fake.commits[0].paths == ("Changed.md", "Same.md")  # the whole stage set, once one is dirty
+
+
+# -- gitignored writes are loud (GW-S13) -------------------------------------------------------
+
+
+def _ignore(wiki: PublisherHarness, path: str) -> None:
+    """A page the backend wrote that a .gitignore hides: on disk, never in ``git status``."""
+    target = wiki.workdir / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# hidden\n")
+    wiki.fake.ignored.add(path)
+
+
+def test_an_ignored_written_path_is_reported_and_never_staged_or_committed(wiki: PublisherHarness) -> None:
+    _ignore(wiki, "Secret.md")
+
+    outcome = wiki.publish(["Secret.md"])
+
+    assert outcome.ignored == ("Secret.md",)
+    assert outcome.committed is False and outcome.sha is None and outcome.error is None
+    assert {"add", "diff", "commit"}.isdisjoint(wiki.subcommands())
+    assert wiki.manifest.entries() == {}  # not dirty, so not pending either
+
+
+def test_ignored_paths_are_asked_through_the_facade_with_names_on_stdin(wiki: PublisherHarness) -> None:
+    _ignore(wiki, "Secret.md")
+
+    wiki.publish(["Secret.md"])
+
+    (call,) = [c for c in wiki.runner.calls if subcommand_and_args(c.argv)[0] == "check-ignore"]
+    assert call.argv == ("git", "check-ignore", "--stdin", "-z")  # names on stdin: no pathspec, no quoting
+    assert call.stdin == "Secret.md\0"
+
+
+def test_an_ignored_path_does_not_block_the_others_from_being_committed(wiki: PublisherHarness) -> None:
+    wiki.write("Home.md")
+    _ignore(wiki, "Secret.md")
+
+    outcome = wiki.publish(["Home.md", "Secret.md"])
+
+    assert outcome.ignored == ("Secret.md",)
+    assert outcome.committed is True and outcome.error is None
+    assert wiki.argvs("add") == [(*ADD, "Home.md")]
+    assert wiki.fake.commits[0].paths == ("Home.md",)
+    assert [item.path for item in outcome.paths] == ["Home.md"]
+
+
+def test_only_clean_written_paths_are_checked_for_ignore_rules(wiki: PublisherHarness) -> None:
+    wiki.write("Home.md")
+
+    outcome = wiki.publish(["Home.md"])
+
+    assert outcome.ignored == ()
+    assert "check-ignore" not in wiki.subcommands()  # dirty in git status: it cannot be ignored
+
+
+def test_a_clean_tracked_page_is_not_reported_as_ignored(wiki: PublisherHarness) -> None:
+    (wiki.workdir / "Home.md").write_text("# same as HEAD\n")
+    wiki.fake.committed_files["Home.md"] = b"# same as HEAD\n"
+    wiki.fake.ignored.add("Home.md")  # a pattern matches, but a tracked file is never ignored
+
+    outcome = wiki.publish(["Home.md"])
+
+    assert outcome.ignored == ()
+    assert outcome.error is None
+
+
+def test_a_check_ignore_that_fails_is_commit_failed_with_nothing_staged(wiki: PublisherHarness) -> None:
+    _ignore(wiki, "Secret.md")
+    wiki.fake.fail["check-ignore"] = (128, "fatal: unable to read the exclude file\n")
+
+    outcome = wiki.publish(["Secret.md"])
+
+    assert outcome.error is not None and outcome.error.code == "commit.failed"
+    assert {"add", "commit"}.isdisjoint(wiki.subcommands())
 
 
 # -- manifest ----------------------------------------------------------------------------------

@@ -897,6 +897,36 @@ def test_local_stdin_reaches_the_runner(git: Git, runner: FakeGitRunner) -> None
     assert runner.calls[0].stdin == "payload"
 
 
+def test_ignored_paths_come_back_in_the_order_asked_and_names_travel_on_stdin(
+    tmp_path: Path, strategy: CountingStrategy
+) -> None:
+    git, runner = failing(strategy, tmp_path, returncode=0, stdout="b.md\0a.md\0")
+
+    assert git.ignored_paths(["a.md", "x[ab].md", "b.md"]) == ("a.md", "b.md")
+    assert runner.calls[0].argv == ("git", "check-ignore", "--stdin", "-z")
+    assert runner.calls[0].stdin == "a.md\0x[ab].md\0b.md\0"
+
+
+def test_no_ignored_path_is_exit_one_and_no_names_run_no_command(
+    tmp_path: Path, strategy: CountingStrategy
+) -> None:
+    git, runner = failing(strategy, tmp_path, returncode=1)
+
+    assert git.ignored_paths(["a.md"]) == ()
+    assert git.ignored_paths([]) == ()
+    assert len(runner.calls) == 1
+
+
+@pytest.mark.parametrize("script", [{"returncode": 128, "stderr": "fatal: bad\n"}, {"timed_out": True}])
+def test_a_check_ignore_that_cannot_answer_is_a_coded_error(
+    tmp_path: Path, strategy: CountingStrategy, script: dict[str, object]
+) -> None:
+    git, _runner = failing(strategy, tmp_path, **script)
+
+    with pytest.raises(GithubWikiError):
+        git.ignored_paths(["a.md"])
+
+
 # -- failures: classification, redaction, timeouts ---------------------------------------
 
 

@@ -299,3 +299,55 @@ def test_a_user_file_created_during_a_failed_write_survives_the_real_rollback(wi
     assert (wiki.workdir / SEED_PAGE).read_text() == SEED_CONTENT  # and the tracked page is back
     assert (wiki.workdir / "Mine.md").read_text() == "the user's own page\n"  # the user's file is not ours
     assert wiki.status() == ["?? Mine.md"]
+
+
+# -- a write git ignores is never silent -----------------------------------------------------------
+
+
+def _hide_with_exclude(wiki: Wiki) -> None:
+    (wiki.git_dir / "info" / "exclude").write_text("*.draft.md\n")
+
+
+def _hide_with_committed_gitignore(wiki: Wiki) -> None:
+    (wiki.workdir / ".gitignore").write_text("*.draft.md\n")
+    wiki.git("add", "--", ".gitignore")
+    wiki.git("commit", "-m", "ignore drafts")
+
+
+@pytest.mark.parametrize("hide", [_hide_with_exclude, _hide_with_committed_gitignore])
+def test_a_page_hidden_by_an_ignore_rule_fails_naming_it_and_the_rest_is_committed(
+    wiki: Wiki, hide
+) -> None:  # noqa: ANN001
+    provider = wiki.provider()
+    provider.exists(ref(SEED_PAGE))  # clone first: the ignore rules live inside the clone
+    hide(wiki)
+    head = wiki.head()
+
+    result = provider.apply_changes(change_set(create("Guide.md", "# Guide\n"), create("Plan.draft.md", "# Plan\n")))
+
+    guide, plan = result.results
+    assert guide.status is OperationStatus.APPLIED, messages(result)
+    assert plan.status is OperationStatus.FAILED
+    assert "[github_wiki:commit.failed]" in (plan.message or "")
+    assert "'Plan.draft.md'" in (plan.message or "") and "ignored by git" in (plan.message or "")
+    assert "Hint: remove the ignore rule or rename the page." in (plan.message or "")
+    assert wiki.last_commit_files() == ["Guide.md"]  # the visible page went in, the ignored one did not
+    assert "Plan.draft.md" not in wiki.committed_files()
+    assert wiki.head() != head
+    assert PendingManifest(wiki.manifest_file, workdir=wiki.workdir).entries() == {}
+
+
+def test_a_tracked_page_matching_an_ignore_rule_is_still_an_ordinary_page(wiki: Wiki) -> None:
+    provider = wiki.provider()
+    provider.exists(ref(SEED_PAGE))
+    (wiki.workdir / "Old.draft.md").write_text("# old\n")
+    wiki.git("add", "-f", "--", "Old.draft.md")  # force-added: tracked although a rule matches it
+    wiki.git("commit", "-m", "track a draft")
+    _hide_with_exclude(wiki)
+
+    changed = provider.apply_changes(change_set(update("Old.draft.md", "# new\n")))
+    same = provider.apply_changes(change_set(update("Old.draft.md", "# new\n")))
+
+    assert statuses(changed) == [OperationStatus.APPLIED], messages(changed)
+    assert statuses(same) == [OperationStatus.SKIPPED]
+    assert wiki.last_commit_files() == ["Old.draft.md"]

@@ -19,6 +19,9 @@ files, and turns them into at most one commit and at most one push:
   the user's hooks.
 * Nothing staged on failure. The commit message is rendered before the first ``add``, so a
   template error (``config.invalid_message``) leaves no staged path behind.
+* Nothing is hidden silently. A written path that ``git status`` omits because an ignore
+  rule hides it is never staged (``add`` would refuse the whole batch) and is reported in
+  ``PublishOutcome.ignored`` so its operation can fail with a message naming it.
 * Honest manifest. Written paths are recorded before anything can fail; committed
   paths are removed; a failed commit leaves them pending with the staged state
   untouched for inspection.
@@ -35,6 +38,7 @@ commit. Problems with the manifest itself (``workdir.manifest_corrupt``) are rai
 from __future__ import annotations
 
 import string
+from functools import partial
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -72,7 +76,8 @@ class PublishOutcome:
     ``sha`` is the commit just made, or ``HEAD`` when only earlier commits were
     pushed; ``None`` when nothing was committed or pushed. ``error`` is set when
     the commit or the push failed (``committed`` tells whether a local commit
-    exists and is retained).
+    exists and is retained). ``ignored`` lists written paths an ignore rule hides from git:
+    they are never staged or committed, and the caller must fail their operations.
     """
 
     workdir: Path
@@ -82,6 +87,7 @@ class PublishOutcome:
     pushed: bool
     paths: tuple[PathResult, ...]
     error: GithubWikiError | None = None
+    ignored: tuple[str, ...] = ()
 
     @property
     def note(self) -> str:
@@ -185,8 +191,17 @@ class Publisher:
             )
         self._manifest.prune(dirty)
         dirty_paths = set(dirty)
+        try:
+            # A written path git does not list as changed is either identical to HEAD or hidden
+            # by an ignore rule; only the second needs telling (it would never be committed).
+            ignored = self._git.ignored_paths([path for path in written_paths if path not in dirty_paths])
+        except GithubWikiError as error:
+            return self._outcome(
+                self._stage_set(written_paths, ()), committed=False, error=self._commit_failure(error)
+            )
         pending = self._manifest.classify(dirty).pending
-        stage = self._stage_set(written_paths, pending)
+        stage = self._stage_set([path for path in written_paths if path not in ignored], pending)
+        outcome = partial(self._outcome, ignored=ignored)
         sha: str | None = None
         committed = False
         if stage:
@@ -194,31 +209,31 @@ class Publisher:
             try:
                 committed = self._commit_if_dirty(paths, dirty_paths, plugin_id, page_count)
             except GithubWikiError as error:
-                return self._outcome(stage, committed=False, error=self._commit_failure(error))
+                return outcome(stage, committed=False, error=self._commit_failure(error))
             # Committed now, or identical to HEAD already: either way nothing stays pending.
             self._manifest.discard(paths)
             if committed:
                 try:
                     sha = self._head()
                 except GithubWikiError as error:
-                    return self._outcome(
+                    return outcome(
                         stage, committed=True, error=self._head_failure(error, committed=True)
                     )
         if not self._push or not (committed or unpushed > 0):
-            return self._outcome(stage, committed=committed, sha=sha)
+            return outcome(stage, committed=committed, sha=sha)
         try:
             sha = sha or self._head()
         except GithubWikiError as error:
-            return self._outcome(
+            return outcome(
                 stage, committed=committed, error=self._head_failure(error, committed=committed)
             )
         try:
             self._git.push(self._branch, context={"sha": sha[:_SHA_LENGTH]})
         except GithubWikiError as error:
-            return self._outcome(
+            return outcome(
                 stage, committed=committed, sha=sha, error=self._push_failure(error, sha)
             )
-        return self._outcome(stage, committed=committed, sha=sha, pushed=True)
+        return outcome(stage, committed=committed, sha=sha, pushed=True)
 
     # -- steps ----------------------------------------------------------------------
 
@@ -276,6 +291,7 @@ class Publisher:
         sha: str | None = None,
         pushed: bool = False,
         error: GithubWikiError | None = None,
+        ignored: tuple[str, ...] = (),
     ) -> PublishOutcome:
         return PublishOutcome(
             workdir=self._git.workdir,
@@ -285,6 +301,7 @@ class Publisher:
             pushed=pushed,
             paths=tuple(PathResult(item.path, item.origin, committed) for item in stage),
             error=error,
+            ignored=ignored,
         )
 
     def _commit_failure(self, error: GithubWikiError) -> GithubWikiError:
