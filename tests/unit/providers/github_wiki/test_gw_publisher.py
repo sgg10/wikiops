@@ -484,6 +484,65 @@ def test_a_message_that_cannot_be_rendered_fails_before_anything_is_staged(
     assert set(wiki.manifest.entries()) == {"Home.md"}  # still pending for the next apply
 
 
+def broken_publisher(wiki: PublisherHarness) -> Publisher:
+    broken = CommitSettings().model_copy(update={"message": "x {nope}"})
+    return Publisher(
+        wiki.git, wiki.manifest, wiki.lock, commit=broken, branch="master", provider_name="n", push=False
+    )
+
+
+def test_a_no_op_apply_never_fails_on_the_message_template(wiki: PublisherHarness) -> None:
+    (wiki.workdir / "Home.md").write_text("# same as HEAD\n")  # clean in git: not dirty
+    wiki.manifest.record(["Home.md"])
+
+    with wiki.lock.hold("apply"):
+        outcome = broken_publisher(wiki).publish(["Home.md"], plugin_id="p", page_count=1)
+
+    assert outcome.error is None and outcome.committed is False and wiki.fake.commits == []
+    assert wiki.manifest.entries() == {}  # identical to HEAD: nothing left pending
+
+
+def test_a_mixed_apply_with_a_changed_page_still_fails_on_the_template_before_staging(
+    wiki: PublisherHarness,
+) -> None:
+    (wiki.workdir / "Same.md").write_text("same")
+    wiki.write("Changed.md")
+
+    with wiki.lock.hold("apply"):
+        outcome = broken_publisher(wiki).publish(["Changed.md", "Same.md"], plugin_id="p", page_count=2)
+
+    assert outcome.error is not None and outcome.error.code == "config.invalid_message"
+    assert "add" not in wiki.subcommands() and wiki.fake.staged == set()
+
+
+def test_when_git_finds_a_difference_the_status_missed_the_message_is_rendered_then(
+    wiki: PublisherHarness,
+) -> None:
+    (wiki.workdir / "Home.md").write_text("# same as HEAD\n")  # status says clean ...
+    wiki.manifest.record(["Home.md"])
+    wiki.fake.fail["diff"] = (1, "")  # ... but the staged diff says it differs
+
+    with wiki.lock.hold("apply"):
+        outcome = broken_publisher(wiki).publish(["Home.md"], plugin_id="p", page_count=1)
+
+    assert outcome.error is not None and outcome.error.code == "config.invalid_message"  # never recoded
+    assert "written but not committed" in str(outcome.error)
+    assert wiki.fake.commits == []
+
+
+def test_when_git_finds_a_difference_the_status_missed_the_valid_message_is_committed(
+    wiki: PublisherHarness,
+) -> None:
+    (wiki.workdir / "Home.md").write_text("# same as HEAD\n")
+    wiki.manifest.record(["Home.md"])
+    wiki.fake.fail["diff"] = (1, "")
+
+    outcome = wiki.publish(["Home.md"])
+
+    assert outcome.error is None and outcome.committed is True
+    assert wiki.fake.commits[0].message == "docs(wiki): update via wikiops plugin azure-docs"
+
+
 def test_a_valid_message_is_rendered_once_before_the_first_staging_command(
     wiki: PublisherHarness,
 ) -> None:

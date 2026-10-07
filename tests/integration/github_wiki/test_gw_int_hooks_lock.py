@@ -153,9 +153,11 @@ def test_a_killed_holder_does_not_block_the_next_run(wiki: Wiki) -> None:
     wiki.provider().exists(ref(SEED_PAGE))
     ready = wiki.root / "child-ready"
     source = str(Path(wikiops.__file__).resolve().parent.parent)
+    # Plain interpreter (no -S): the child keeps the venv's site-packages, so importing the
+    # package works even when it pulls third-party dependencies.
     child = subprocess.Popen(
-        [sys.executable, "-S", "-c", CHILD_HOLDS_THE_LOCK, str(wiki.git_dir / "wikiops" / "lock"), str(wiki.workdir), str(ready)],
-        env={**os.environ, "PYTHONPATH": source},
+        [sys.executable, "-c", CHILD_HOLDS_THE_LOCK, str(wiki.git_dir / "wikiops" / "lock"), str(wiki.workdir), str(ready)],
+        env={**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, [source, os.environ.get("PYTHONPATH")]))},
     )
     try:
         deadline = time.monotonic() + 20

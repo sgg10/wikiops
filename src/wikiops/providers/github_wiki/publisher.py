@@ -30,8 +30,9 @@ commit. Problems with the manifest itself (``workdir.manifest_corrupt``) are rai
 
 from __future__ import annotations
 
+import functools
 import string
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -180,19 +181,24 @@ class Publisher:
                 self._stage_set(written_paths, ()), committed=False, error=self._commit_failure(error)
             )
         self._manifest.prune(dirty)
+        dirty_paths = set(dirty)
         pending = self._manifest.classify(dirty).pending
         stage = self._stage_set(written_paths, pending)
         sha: str | None = None
         committed = False
         if stage:
-            try:
-                message = render_commit_message(
+            render = functools.cache(
+                lambda: render_commit_message(
                     self._commit.message,
                     plugin_id=plugin_id,
                     provider_name=self._provider_name,
                     page_count=page_count,
                 )
-                committed = self._stage_and_commit([item.path for item in stage], message)
+            )
+            try:
+                if not dirty_paths.isdisjoint(item.path for item in stage):
+                    render()  # something will be committed: a bad template fails before any staging
+                committed = self._stage_and_commit([item.path for item in stage], render)
             except GithubWikiError as error:
                 return self._outcome(stage, committed=False, error=self._commit_failure(error))
             # Committed now, or identical to HEAD already: either way nothing stays pending.
@@ -201,13 +207,17 @@ class Publisher:
                 try:
                     sha = self._head()
                 except GithubWikiError as error:
-                    return self._outcome(stage, committed=True, error=self._head_failure(error))
+                    return self._outcome(
+                        stage, committed=True, error=self._head_failure(error, committed=True)
+                    )
         if not self._push or not (committed or unpushed > 0):
             return self._outcome(stage, committed=committed, sha=sha)
         try:
             sha = sha or self._head()
         except GithubWikiError as error:
-            return self._outcome(stage, committed=committed, error=self._head_failure(error))
+            return self._outcome(
+                stage, committed=committed, error=self._head_failure(error, committed=committed)
+            )
         try:
             self._git.push(self._branch, context={"sha": sha[:_SHA_LENGTH]})
         except GithubWikiError as error:
@@ -224,8 +234,12 @@ class Publisher:
         origins.update({path: "written" for path in written})
         return tuple(PathResult(path, origins[path], False) for path in sorted(origins))
 
-    def _stage_and_commit(self, paths: list[str], message: str) -> bool:
-        """Stage ``paths`` and commit them; ``False`` when they do not differ from HEAD."""
+    def _stage_and_commit(self, paths: list[str], render_message: Callable[[], str]) -> bool:
+        """Stage ``paths`` and commit them; ``False`` when they do not differ from HEAD.
+
+        The message is rendered only when there is something to commit, so an apply whose
+        pages already match HEAD never fails on the template.
+        """
         self._git.local("add", paths=paths, op="add")
         staged = self._git.local("diff", "--cached", "--quiet", paths=paths, check=False)
         if staged.timed_out or staged.returncode not in (0, 1):
@@ -238,7 +252,7 @@ class Publisher:
         if staged.returncode == 0:
             return False
         self._git.local(
-            "commit", "-m", message, paths=paths, op="commit", env=_identity_environment(self._commit)
+            "commit", "-m", render_message(), paths=paths, op="commit", env=_identity_environment(self._commit)
         )
         return True
 
@@ -276,12 +290,21 @@ class Publisher:
             hint=error.hint if error.code == code else None,
         )
 
-    def _head_failure(self, error: GithubWikiError) -> GithubWikiError:
-        """HEAD could not be read: the commit (if any) exists, its sha is unknown, nothing is pushed."""
+    def _head_failure(self, error: GithubWikiError, *, committed: bool) -> GithubWikiError:
+        """HEAD could not be read, so nothing is pushed.
+
+        After a commit of this run the commit exists and only its sha is unknown; without one
+        (an apply that only carries earlier unpushed commits) nothing was committed here.
+        """
+        workdir = self._git.workdir
+        summary = (
+            f"committed locally in '{workdir}' but its sha could not be read (not pushed): {error.summary}"
+            if committed
+            else f"unpushed local commits in '{workdir}' were not pushed because HEAD could not be read: {error.summary}"
+        )
         return GithubWikiError(
             error.code,
-            f"committed locally in '{self._git.workdir}' but its sha could not be read "
-            f"(not pushed): {error.summary}",
+            summary,
             context={**error.context, "workdir": str(self._git.workdir)},
             hint=error.hint,
         )

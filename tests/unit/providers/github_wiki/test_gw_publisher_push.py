@@ -280,3 +280,14 @@ def test_an_unreadable_head_before_an_unpushed_only_push_is_reported_not_raised(
     assert outcome.committed is False and outcome.sha is None and outcome.pushed is False
     assert outcome.error is not None and outcome.error.code == "sync.git_failed"
     assert "not pushed" in str(outcome.error) and str(pusher.workdir) in str(outcome.error)
+    assert "committed locally" not in str(outcome.error)  # nothing was committed in this run
+    assert "unpushed" in str(outcome.error) and "HEAD could not be read" in str(outcome.error)
+
+
+def test_an_unreadable_head_after_a_commit_still_says_it_committed_locally(pusher: PublisherHarness) -> None:
+    pusher.fake.fail["rev-parse"] = (128, "fatal: unable to read HEAD\n")
+
+    outcome = pushed_page(pusher)
+
+    assert outcome.error is not None
+    assert "committed locally" in str(outcome.error) and "sha could not be read" in str(outcome.error)
