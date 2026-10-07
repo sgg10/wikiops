@@ -129,6 +129,47 @@ def test_every_command_unsets_inherited_repository_selectors_and_pins_the_locale
         assert call.env_overrides["GIT_CEILING_DIRECTORIES"] == str(workdir.parent)
 
 
+def test_the_locale_pin_cannot_be_overridden_by_a_transport_or_a_caller(
+    runner: FakeGitRunner, workdir: Path
+) -> None:
+    class LocaleOverridingStrategy(CountingStrategy):
+        def transport(self) -> GitTransport:
+            base = super().transport()
+            return GitTransport(
+                base.remote_url,
+                {**base.env_overrides, "LC_ALL": "de_DE.UTF-8", "LANGUAGE": "de"},
+                base.secrets,
+                base.label,
+            )
+
+    git = Git(runner, LocaleOverridingStrategy(), workdir=workdir, timeout=TIMEOUT)
+
+    git.fetch("master")
+    git.local("status", env={"LC_ALL": "fr_FR.UTF-8", "LANGUAGE": "fr", "GIT_AUTHOR_NAME": "me"})
+
+    assert [(call.env_overrides["LC_ALL"], call.env_overrides["LANGUAGE"]) for call in runner.calls] == [
+        ("C", ""),
+        ("C", ""),
+    ]
+    assert runner.calls[1].env_overrides["GIT_AUTHOR_NAME"] == "me"  # other overrides still apply
+
+
+def test_a_local_command_needs_a_subcommand(git: Git, runner: FakeGitRunner) -> None:
+    with pytest.raises(ValueError, match="subcommand"):
+        git.local()
+
+    assert runner.calls == []
+
+
+def test_a_local_command_with_only_paths_still_needs_a_subcommand(
+    git: Git, runner: FakeGitRunner
+) -> None:
+    with pytest.raises(ValueError, match="subcommand"):
+        git.local(paths=["Home.md"])
+
+    assert runner.calls == []
+
+
 def test_every_command_is_bounded_by_the_configured_timeout(git: Git, runner: FakeGitRunner) -> None:
     run_every_command(git)
 

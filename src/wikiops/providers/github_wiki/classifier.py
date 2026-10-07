@@ -23,6 +23,9 @@ _HOST_KEY = "auth.ssh_host_key"
 _NOT_FOUND = "wiki.not_initialized"
 _AUTH = "auth.rejected"
 _NETWORK = "network.unreachable"
+# The one definition of the ssh "key refused" marker: it classifies the failure
+# as ``auth.rejected`` and selects the ssh-specific hint.
+_PUBLICKEY_DENIED = r"permission denied \(publickey"
 
 
 def _patterns(*sources: str) -> tuple[re.Pattern[str], ...]:
@@ -50,7 +53,7 @@ _REMOTE_CLASSES: tuple[tuple[str, tuple[re.Pattern[str], ...]], ...] = (
             r"invalid username or password",
             r"requested url returned error: 40[13]",
             r"http basic: access denied",
-            r"permission denied \(publickey",
+            _PUBLICKEY_DENIED,
         ),
     ),
     (
@@ -71,7 +74,7 @@ _IDENTITY_MISSING = _patterns(
     r"unable to auto-detect email address",
     r"author identity unknown",
 )
-_SSH_KEY_DENIED = re.compile(r"permission denied \(publickey", re.IGNORECASE)
+_SSH_KEY_DENIED = re.compile(_PUBLICKEY_DENIED, re.IGNORECASE)
 
 _SUMMARIES = {
     _HOST_KEY: "SSH host key verification failed",

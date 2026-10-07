@@ -24,6 +24,7 @@ from pydantic import (
 from pydantic.fields import FieldInfo
 
 from wikiops.providers.github_wiki.errors import GithubWikiError
+from wikiops.providers.github_wiki.text import has_control_characters
 from wikiops_sdk.contracts import ProviderSettings
 
 _ENV_VARIABLE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -70,7 +71,7 @@ class _Strict(BaseModel):
 
 
 def _no_control_characters(value: str, *, label: str) -> str:
-    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in value):
+    if has_control_characters(value):
         raise ValueError(f"{label} must not contain control characters")
     return value
 
@@ -214,7 +215,7 @@ def _branch_problem(branch: str) -> str | None:
         return "it is empty"
     if any(char.isspace() for char in branch):
         return "it contains whitespace"
-    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in branch):
+    if has_control_characters(branch):
         return "it contains control characters"
     if branch.startswith("-"):
         return "it starts with '-'"
@@ -440,7 +441,7 @@ def _tagged_error(error: Mapping[str, Any]) -> GithubWikiError | None:
 
 def _generic_error(error: Mapping[str, Any]) -> GithubWikiError:
     """Translate an untagged pydantic error into ``config.invalid``."""
-    path, owner, field = _locate(tuple(error["loc"]))
+    path, owner, _ = _locate(tuple(error["loc"]))
     kind = error["type"]
     if kind in {"union_tag_invalid", "union_tag_not_found"}:
         info = owner.model_fields.get(error["loc"][-1]) if owner is not None else None

@@ -51,13 +51,15 @@ _UNSET_VARIABLES = (
 _HOOKS_DIRECTORY_PREFIX = "wikiops-nohooks-"
 
 
+# Applied last on every command: a transport or caller override can never
+# change the locale the classifier's patterns depend on.
+_LOCALE_PIN: dict[str, str | None] = {"LC_ALL": "C", "LANGUAGE": ""}
+
+
 def _base_environment(workdir: Path) -> dict[str, str | None]:
     environment: dict[str, str | None] = dict.fromkeys(_UNSET_VARIABLES)
-    environment.update(
-        LC_ALL="C",
-        LANGUAGE="",
-        GIT_CEILING_DIRECTORIES=str(workdir.parent),
-    )
+    environment.update(_LOCALE_PIN)
+    environment["GIT_CEILING_DIRECTORIES"] = str(workdir.parent)
     return environment
 
 
@@ -100,6 +102,8 @@ class Git:
         command raises the classified error for ``op`` (default: the
         subcommand); without it the caller interprets the result.
         """
+        if not args:
+            raise ValueError("a git subcommand is required")
         argv: tuple[str, ...]
         if paths is None:
             argv = ("git", *args)
@@ -110,7 +114,7 @@ class Git:
         result = self._runner.run(
             argv,
             cwd=self._workdir,
-            env_overrides={**self._base, **(env or {})},
+            env_overrides={**self._base, **(env or {}), **_LOCALE_PIN},
             timeout=self._timeout,
             stdin=stdin,
         )
@@ -235,6 +239,7 @@ class Git:
         environment = {
             **self._base,
             **transport.env_overrides,
+            **_LOCALE_PIN,
             "GIT_CONFIG_PARAMETERS": None,
         }
         with tempfile.TemporaryDirectory(prefix=_HOOKS_DIRECTORY_PREFIX) as hooks_directory:

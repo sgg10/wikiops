@@ -162,22 +162,89 @@ def test_page_without_md_suffix_is_not_markdown(path: str, suggestion: str) -> N
     assert f"'{suggestion}'" in error.hint
 
 
-@pytest.mark.parametrize("path", [".md", ".MD", ".Md", " .md", "\t.md", " .md"])
-def test_page_with_an_empty_stem_is_not_markdown(path: str) -> None:
+# A stem that is empty or whitespace-only leaves a path with no page name at all,
+# the same situation as a blank path (`ref.missing_path`). The closed code
+# vocabulary has no dedicated "invalid name" code, and `path.not_markdown` was
+# misleading here: the file name does end in `.md`, it just names nothing.
+BLANK_STEM_PATHS = [
+    pytest.param(".md", id="empty"),
+    pytest.param(".MD", id="empty-upper"),
+    pytest.param(".Md", id="empty-mixed"),
+    pytest.param(" .md", id="space"),
+    pytest.param("  .md", id="two-spaces"),
+    pytest.param("\t.md", id="tab"),
+    pytest.param("\u00a0.md", id="nbsp"),
+    pytest.param("\u2003.md", id="em-space"),
+]
+
+
+@pytest.mark.parametrize("path", BLANK_STEM_PATHS)
+def test_page_with_an_empty_stem_has_no_page_name(path: str) -> None:
     error = failure(path_ref(path))
 
-    assert error.code == "path.not_markdown"
-    assert error.context["path"] == path
+    assert error.code == "ref.missing_path"
     assert "before '.md'" in error.hint
     assert MESSAGE_SHAPE.match(str(error))
 
 
-@pytest.mark.parametrize("path", ["a.md", "..md", " a.md", ".md.md", "-.md"])
+def test_the_blank_stem_cases_are_all_distinct() -> None:
+    # Guards the parametrization itself: a visually identical (NBSP vs space)
+    # duplicate would silently halve the coverage.
+    values = [param.values[0] for param in BLANK_STEM_PATHS]
+    assert len(set(values)) == len(values)
+
+
+@pytest.mark.parametrize("path", ["a.md", "..md", ".md.md", "-.md", "my page.md", "Ünï cödé.md"])
 def test_page_with_a_non_blank_stem_stays_accepted(path: str) -> None:
     assert validate_page_ref(path_ref(path)) == path
 
 
-# -- check order: kind -> missing -> reserved -> nested -> not_markdown -------
+# -- unsafe flat names: control characters and surrounding whitespace -----------
+
+UNSAFE_NAMES = [
+    pytest.param("a\x00b.md", "control characters", id="nul"),
+    pytest.param("a\nb.md", "control characters", id="newline"),
+    pytest.param("a\tb.md", "control characters", id="tab"),
+    pytest.param("a\rb.md", "control characters", id="carriage-return"),
+    pytest.param("a\x1bb.md", "control characters", id="escape"),
+    pytest.param("a\x7fb.md", "control characters", id="del"),
+    pytest.param("a\x85b.md", "control characters", id="c1-nel"),
+    pytest.param("a\x00", "control characters", id="nul-without-suffix"),
+    pytest.param(" a.md", "whitespace", id="leading-space"),
+    pytest.param("\u00a0a.md", "whitespace", id="leading-nbsp"),
+    pytest.param("a .md", "whitespace", id="space-before-suffix"),
+    pytest.param("a\u2003.md", "whitespace", id="em-space-before-suffix"),
+    pytest.param("a.md ", "whitespace", id="trailing-space"),
+    pytest.param("a.txt\u00a0", "whitespace", id="trailing-nbsp-without-suffix"),
+]
+
+
+@pytest.mark.parametrize(("path", "reason"), UNSAFE_NAMES)
+def test_unsafe_flat_names_are_rejected(path: str, reason: str) -> None:
+    error = failure(path_ref(path))
+
+    assert error.code == "path.reserved"
+    assert reason in error.summary
+    assert MESSAGE_SHAPE.match(str(error))
+    assert "\n" not in str(error) and "\x00" not in str(error)
+
+
+def test_unsafe_names_are_reported_before_the_markdown_suffix_rule() -> None:
+    assert failure(path_ref("notes\x00.txt")).code == "path.reserved"
+    assert failure(path_ref("notes.txt ")).code == "path.reserved"
+
+
+@pytest.mark.parametrize("path", ["a\x00/b.md", "a/\x00.md"])
+def test_nested_is_checked_before_unsafe_names(path: str) -> None:
+    assert failure(path_ref(path)).code == "path.nested_not_supported"
+
+
+def test_reserved_git_is_checked_before_unsafe_names() -> None:
+    assert failure(path_ref(".git/\x00x.md")).code == "path.reserved"
+    assert failure(path_ref("a/.git/\x00")).code == "path.reserved"
+
+
+# -- check order: kind -> missing -> reserved -> nested -> blank stem -> unsafe -> not_markdown --
 
 
 def test_kind_is_checked_before_everything_else() -> None:
@@ -273,6 +340,8 @@ def test_derived_reference_is_always_a_valid_flat_page(title: str) -> None:
         "bad\x00name",
         "bell\x07",
         "del\x7f",
+        "c1\x80name",
+        "c1\x9fname",
     ],
 )
 def test_unusable_title_is_rejected_and_never_nests(title: str) -> None:

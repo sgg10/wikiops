@@ -167,6 +167,8 @@ def test_valid_commit_messages(message: str) -> None:
         "a\\b",
         "a\x01b",
         "a\x7fb",
+        "a\x85b",
+        "a\x9fb",
         "feature/",
         "/feature",
         "a//b",

@@ -26,6 +26,7 @@ from wikiops.providers.github_wiki.settings import (
     check_host,
     check_repository,
 )
+from wikiops.providers.github_wiki.text import has_control_characters
 
 _MARKDOWN_SUFFIX = ".md"
 _FOREIGN_MARKDOWN_SUFFIXES = frozenset({".markdown", ".mdx", ".txt"})
@@ -80,15 +81,39 @@ def _nested_error(path: str) -> GithubWikiError:
     )
 
 
+def _unsafe_name_problem(path: str, *, has_suffix: bool) -> str | None:
+    """Return why the flat page name ``path`` is unsafe, or ``None`` when it is fine.
+
+    Control characters (including NUL) and leading or trailing whitespace are
+    rejected: they cannot be told apart on screen, trip git and file systems
+    (Windows silently trims them) and would make two names look identical.
+    Whitespace right before the ``.md`` suffix counts as trailing whitespace of
+    the stem.
+    """
+    if has_control_characters(path):
+        return "it contains control characters"
+    stem = path[: -len(_MARKDOWN_SUFFIX)] if has_suffix else path
+    if path != path.strip() or stem != stem.strip():
+        return "it starts or ends with whitespace"
+    return None
+
+
 def validate_page_ref(ref: DocumentRef) -> str:
     """Return the root-level ``.md`` page name of ``ref`` or raise a coded error.
 
     Checks run in a fixed order and the first failure wins: reference kind
     (``ref.unsupported_kind``), presence of a path (``ref.missing_path``), a
     ``.git`` component (``path.reserved``), any path separator
-    (``path.nested_not_supported``) and the ``.md`` suffix, case-insensitive,
-    with a non-blank name before it (``path.not_markdown``). The returned name
-    is the path unchanged.
+    (``path.nested_not_supported``), a blank stem before ``.md``
+    (``ref.missing_path``), an unsafe name (``path.reserved``) and the ``.md``
+    suffix, case-insensitive (``path.not_markdown``). The returned name is the
+    path unchanged.
+
+    Code choices: the closed vocabulary has no "invalid name" code. A stem that
+    is empty or whitespace-only means the reference names no page at all, which
+    is what ``ref.missing_path`` already reports for a blank path. A name with
+    control characters or surrounding whitespace is a name the wiki refuses to
+    use, reported as ``path.reserved`` with the exact reason in the summary.
     """
     if ref.kind is not RefKind.PATH:
         raise GithubWikiError(
@@ -112,19 +137,28 @@ def validate_page_ref(ref: DocumentRef) -> str:
         )
     if len(segments) > 1:
         raise _nested_error(path)
-    if not path.lower().endswith(_MARKDOWN_SUFFIX):
+    has_suffix = path.lower().endswith(_MARKDOWN_SUFFIX)
+    if has_suffix and not path[: -len(_MARKDOWN_SUFFIX)].strip():
+        raise GithubWikiError(
+            "ref.missing_path",
+            "The page reference has no page name before '.md'",
+            context={"path": path},
+            hint="use a page name with at least one character before '.md', such as 'Home.md'",
+        )
+    problem = _unsafe_name_problem(path, has_suffix=has_suffix)
+    if problem is not None:
+        raise GithubWikiError(
+            "path.reserved",
+            f"The page name is not allowed: {problem}",
+            context={"path": path},
+            hint="use a page name without control characters or surrounding whitespace",
+        )
+    if not has_suffix:
         raise GithubWikiError(
             "path.not_markdown",
             "Wiki page paths must end in '.md'",
             context={"path": path},
             hint=f"use '{_suggest_markdown_name(path)}' instead",
-        )
-    if not path[: -len(_MARKDOWN_SUFFIX)].strip():
-        raise GithubWikiError(
-            "path.not_markdown",
-            "Wiki page paths need a name before '.md'",
-            context={"path": path},
-            hint="use a page name with at least one character before '.md', such as 'Home.md'",
         )
     return path
 
@@ -135,7 +169,7 @@ def _title_problem(title: str) -> str | None:
         return "it is empty"
     if title.startswith("."):
         return "it starts with '.'"
-    if any(ord(char) < 32 or ord(char) == 127 for char in title):
+    if has_control_characters(title):
         return "it contains a control character"
     forbidden = sorted(_TITLE_FORBIDDEN_CHARS.intersection(title))
     if forbidden:

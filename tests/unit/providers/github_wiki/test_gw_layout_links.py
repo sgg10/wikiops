@@ -188,12 +188,20 @@ def test_page_link_applies_the_page_policy_first() -> None:
     assert caught.value.code == "path.nested_not_supported"
 
 
-@pytest.mark.parametrize("path", [".md", ".MD", " .md"])
+@pytest.mark.parametrize("path", [".md", ".MD", " .md", "\u00a0.md", "\t.md"])
 def test_page_link_never_points_at_the_wiki_root_for_an_empty_stem(path: str) -> None:
     with pytest.raises(GithubWikiError) as caught:
         build_link(page_ref(path), host="github.com", repository="acme/platform")
 
-    assert caught.value.code == "path.not_markdown"
+    assert caught.value.code == "ref.missing_path"
+
+
+@pytest.mark.parametrize("path", ["a\x00b.md", " a.md", "a .md", "a\nb.md"])
+def test_page_link_is_never_built_for_an_unsafe_name(path: str) -> None:
+    with pytest.raises(GithubWikiError) as caught:
+        build_link(page_ref(path), host="github.com", repository="acme/platform")
+
+    assert caught.value.code == "path.reserved"
 
 
 @pytest.mark.parametrize(

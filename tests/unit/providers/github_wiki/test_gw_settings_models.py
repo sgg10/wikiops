@@ -185,7 +185,7 @@ def test_env_variable_names_that_are_not_identifiers_are_rejected(variable: str)
         build(auth={"mode": "env", "variable": variable})
 
 
-@pytest.mark.parametrize("key_path", ["/k/a\nb", "/k/a\x00b", ""])
+@pytest.mark.parametrize("key_path", ["/k/a\nb", "/k/a\x00b", "/k/a\x85b", "/k/a\x9fb", ""])
 def test_ssh_key_path_rejects_newline_nul_and_empty(key_path: str) -> None:
     with pytest.raises(ValidationError):
         build(auth={"mode": "ssh", "key_path": key_path})

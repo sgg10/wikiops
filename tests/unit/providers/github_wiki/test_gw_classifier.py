@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import inspect
 import re
 
 import pytest
 
+from wikiops.providers.github_wiki import classifier
 from wikiops.providers.github_wiki.classifier import (
     PushRefResult,
     classify,
@@ -530,3 +532,18 @@ def test_push_output_is_redacted_like_everything_else() -> None:
     error = classify("push", result, redactor=Redactor((token,)))
 
     assert token not in str(error)
+
+
+# -- the ssh publickey marker has one source ---------------------------------
+
+
+def test_the_ssh_publickey_marker_is_defined_once_and_shared_by_both_uses() -> None:
+    source = inspect.getsource(classifier).lower()
+    assert source.count("permission denied") == 1  # one regex, not a copy per use
+
+    ssh_denied = CommandResult(
+        ("git", "fetch"), 128, "", "git@github.com: Permission denied (publickey).\n", False
+    )
+    error = classify("fetch", ssh_denied, redactor=PLAIN)
+    assert error.code == "auth.rejected"
+    assert "auth.key_path" in error.hint  # the ssh-specific hint reads the same marker

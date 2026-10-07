@@ -1,25 +1,37 @@
-"""Unit tests for ``SubprocessGitRunner`` against real subprocesses (no git)."""
+"""Unit tests for ``SubprocessGitRunner`` against real subprocesses (no git).
+
+Timing contract of these tests: a "timeout" test never asserts a tight upper
+bound (that would depend on machine load) and never depends on how fast the
+interpreter starts. Children run ``python -S`` (no site import, ~20 ms start),
+the timeout that must expire is ``SHORT`` (50x that), and the only upper bounds
+are hang detectors an order of magnitude above the expected duration.
+"""
 
 from __future__ import annotations
 
 import os
+import signal
 import sys
 import time
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
 
+from wikiops.providers.github_wiki import process
 from wikiops.providers.github_wiki.ports import CommandResult, GitRunner
 from wikiops.providers.github_wiki.process import SubprocessGitRunner
 
 PY = sys.executable
 GENEROUS = 30.0
+SHORT = 1.0  # a timeout that is meant to expire
+HANG = 15.0  # no run below may take this long: it would be a hang, not slowness
 
 posix_only = pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX-only")
 
 
 def python(code: str, *args: str) -> list[str]:
-    return [PY, "-c", code, *args]
+    return [PY, "-S", "-c", code, *args]
 
 
 def run(
@@ -148,6 +160,32 @@ def test_the_baseline_wins_over_the_ambient_environment_but_not_over_an_override
     assert run(python(code), env={"GIT_TERMINAL_PROMPT": "1"}).stdout.strip() == "1"
 
 
+def test_the_locale_is_pinned_so_tool_output_is_always_english(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LC_ALL", "de_DE.UTF-8")
+    monkeypatch.setenv("LANGUAGE", "de:fr")
+    code = "import os; print(os.environ.get('LC_ALL'), repr(os.environ.get('LANGUAGE')))"
+
+    assert run(python(code)).stdout.strip() == "C ''"
+
+
+def test_the_locale_baseline_applies_when_the_ambient_environment_sets_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("LC_ALL", raising=False)
+    monkeypatch.delenv("LANGUAGE", raising=False)
+    code = "import os; print(os.environ.get('LC_ALL'), repr(os.environ.get('LANGUAGE')))"
+
+    assert run(python(code)).stdout.strip() == "C ''"
+
+
+def test_an_explicit_override_still_wins_over_the_locale_baseline() -> None:
+    code = "import os; print(os.environ.get('LC_ALL'))"
+
+    assert run(python(code), env={"LC_ALL": "C.UTF-8"}).stdout.strip() == "C.UTF-8"
+
+
 def test_the_process_environment_of_the_caller_is_never_modified() -> None:
     before = dict(os.environ)
 
@@ -175,15 +213,25 @@ def test_stdin_text_is_delivered_when_given() -> None:
 # -- timeout -----------------------------------------------------------------
 
 
+def wait_for_file(path: Path, *, limit: float = GENEROUS) -> str:
+    """The text of ``path`` once a child wrote it (polling, never a fixed sleep)."""
+    deadline = time.monotonic() + limit
+    while time.monotonic() < deadline:
+        if path.exists() and path.read_text():
+            return path.read_text()
+        time.sleep(0.02)
+    raise AssertionError(f"{path.name} was never written")
+
+
 def test_a_command_over_its_timeout_is_killed_and_reported() -> None:
     started = time.monotonic()
 
-    result = run(python("import time; print('started', flush=True); time.sleep(60)"), timeout=1.0)
+    result = run(python("import time; print('started', flush=True); time.sleep(60)"), timeout=SHORT)
 
     assert result.timed_out is True
     assert result.returncode != 0
     assert "started" in result.stdout
-    assert time.monotonic() - started < 20
+    assert time.monotonic() - started < HANG
 
 
 def test_a_command_that_finishes_in_time_is_not_flagged() -> None:
@@ -195,18 +243,18 @@ def test_a_timeout_leaves_no_orphaned_grandchild(tmp_path: Path) -> None:
     pid_file = tmp_path / "grandchild.pid"
     code = (
         "import subprocess, sys, time; "
-        "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
+        "p = subprocess.Popen([sys.executable, '-S', '-c', 'import time; time.sleep(60)']); "
         f"open({str(pid_file)!r}, 'w').write(str(p.pid)); "
         "time.sleep(60)"
     )
 
     started = time.monotonic()
-    result = run(python(code), timeout=2.0)
+    result = run(python(code), timeout=SHORT)
 
     assert result.timed_out is True
     # A grandchild that kept the pipes open would block the runner until it exited.
-    assert time.monotonic() - started < 20
-    grandchild = int(pid_file.read_text())
+    assert time.monotonic() - started < HANG
+    grandchild = int(wait_for_file(pid_file))
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
         try:
@@ -219,10 +267,56 @@ def test_a_timeout_leaves_no_orphaned_grandchild(tmp_path: Path) -> None:
         pytest.fail("grandchild process survived the timeout")
 
 
+@posix_only
+def test_a_daemonized_descendant_holding_the_pipes_cannot_stall_the_runner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The descendant leaves the killed process group (setsid) but keeps the
+    # inherited pipes open for 30 s: an unbounded drain would wait for it.
+    monkeypatch.setattr(process, "_DRAIN_SECONDS", 0.3)
+    pid_file = tmp_path / "daemon.pid"
+    code = (
+        "import subprocess, sys, time; "
+        "d = subprocess.Popen([sys.executable, '-S', '-c', 'import time; time.sleep(30)'], "
+        "start_new_session=True); "
+        f"open({str(pid_file)!r}, 'w').write(str(d.pid)); "
+        "print('partial output', flush=True); "
+        "time.sleep(60)"
+    )
+
+    started = time.monotonic()
+    try:
+        result = run(python(code), timeout=SHORT)
+        elapsed = time.monotonic() - started
+    finally:
+        with suppress(FileNotFoundError, ProcessLookupError, ValueError):
+            os.kill(int(pid_file.read_text()), signal.SIGKILL)
+
+    assert result.timed_out is True
+    assert result.returncode != 0
+    assert "partial output" in result.stdout  # what was read before the bound is kept
+    assert elapsed < 10  # far below the 30 s the daemon holds the pipes
+
+
+@posix_only
+def test_the_drain_after_a_timeout_still_collects_output_of_the_killed_tree() -> None:
+    code = (
+        "import sys, time; "
+        "sys.stdout.write('o' * 200_000); sys.stdout.flush(); "
+        "sys.stderr.write('e' * 200_000); sys.stderr.flush(); "
+        "time.sleep(60)"
+    )
+
+    result = run(python(code), timeout=SHORT)
+
+    assert result.timed_out is True
+    assert (len(result.stdout), len(result.stderr)) == (200_000, 200_000)
+
+
 # -- failure to start --------------------------------------------------------
 
 
-def test_a_missing_executable_is_a_failed_result_not_an_exception() -> None:
+def test_a_missing_executable_is_command_not_found() -> None:
     argv = ["wikiops-no-such-binary-xyz", "--version"]
 
     result = run(argv)
@@ -230,14 +324,53 @@ def test_a_missing_executable_is_a_failed_result_not_an_exception() -> None:
     assert result.returncode == 127
     assert result.argv == tuple(argv)
     assert result.stdout == ""
-    assert "wikiops-no-such-binary-xyz" in result.stderr
+    assert "wikiops-no-such-binary-xyz: command not found" in result.stderr
+    assert "working directory" not in result.stderr
     assert result.timed_out is False
 
 
-def test_a_missing_working_directory_is_a_failed_result_not_an_exception(
-    tmp_path: Path,
+@pytest.mark.parametrize("kind", ["missing", "a-file"])
+def test_an_unusable_working_directory_is_reported_as_such_not_as_a_missing_command(
+    tmp_path: Path, kind: str
 ) -> None:
-    result = run(python("pass"), cwd=tmp_path / "does-not-exist")
+    cwd = tmp_path / "does-not-exist"
+    if kind == "a-file":
+        cwd.write_text("not a directory")
 
-    assert result.returncode == 127
-    assert "does-not-exist" in result.stderr
+    result = run(python("pass"), cwd=cwd)
+
+    assert result.returncode == 126
+    assert "working directory" in result.stderr
+    assert str(cwd) in result.stderr
+    assert "command not found" not in result.stderr
+
+
+def test_an_unusable_working_directory_wins_over_a_missing_command(tmp_path: Path) -> None:
+    result = run(["wikiops-no-such-binary-xyz"], cwd=tmp_path / "does-not-exist")
+
+    assert result.returncode == 126
+    assert "working directory" in result.stderr
+
+
+@posix_only
+def test_an_executable_that_cannot_be_run_is_a_permission_problem(tmp_path: Path) -> None:
+    tool = tmp_path / "tool"
+    tool.write_text("#!/bin/sh\n")
+    tool.chmod(0o644)
+
+    result = run([str(tool)])
+
+    assert result.returncode == 126
+    assert f"{tool}: cannot execute" in result.stderr
+    assert "command not found" not in result.stderr
+    assert "working directory" not in result.stderr
+
+
+def test_start_failures_never_raise_and_keep_the_other_fields_empty(tmp_path: Path) -> None:
+    results = [
+        run(["wikiops-no-such-binary-xyz"]),
+        run(python("pass"), cwd=tmp_path / "missing"),
+    ]
+
+    assert [(r.stdout, r.timed_out) for r in results] == [("", False), ("", False)]
+    assert [r.returncode for r in results] == [127, 126]
