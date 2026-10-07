@@ -112,6 +112,49 @@ def test_malformed_status_is_a_coded_git_failure(text: str) -> None:
     assert error.value.code == "sync.git_failed"
 
 
+@pytest.mark.parametrize(
+    ("text", "paths"),
+    [
+        ("?? nested-repo/\0", ("nested-repo/",)),
+        ("?? Home.md\0?? vendor/clone/\0 M other.md\0", ("Home.md", "vendor/clone/", "other.md")),
+    ],
+)
+def test_a_collapsed_untracked_directory_keeps_its_trailing_slash(
+    text: str, paths: tuple[str, ...]
+) -> None:
+    # git collapses a nested repository even under --untracked-files=all; the entry
+    # stays recognisable as a directory instead of posing as a page path.
+    assert parse_status(text) == paths
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        " M dir/\0",  # only an untracked entry can be a collapsed directory
+        "A  dir/\0",
+        "R  new/\0old.md\0",
+    ],
+)
+def test_a_trailing_slash_on_anything_but_an_untracked_entry_is_a_coded_git_failure(text: str) -> None:
+    with pytest.raises(GithubWikiError) as error:
+        parse_status(text)
+    assert error.value.code == "sync.git_failed"
+
+
+def test_a_collapsed_directory_is_always_foreign_even_when_the_manifest_lists_files_below_it(
+    workdir: Path, manifest: PendingManifest
+) -> None:
+    write(workdir, "nested-repo/Page.md", b"mine")
+    manifest.record(["nested-repo/Page.md"])
+    dirty = parse_status("?? nested-repo/\0")
+    result = manifest.classify(dirty)
+    assert result == Classification(pending=(), foreign=("nested-repo/",))
+    with pytest.raises(GithubWikiError) as error:
+        manifest.check(dirty)
+    assert error.value.code == "workdir.dirty"
+    assert error.value.context["paths"] == "nested-repo/"
+
+
 # -- recording ----------------------------------------------------------------
 
 
@@ -175,6 +218,29 @@ def test_record_of_a_missing_file_is_refused_and_writes_nothing(
     assert error.value.code == "workdir.unusable"
     assert "Ghost.md" in str(error.value)
     assert not (workdir / ".git" / "wikiops").exists()
+
+
+def test_record_without_a_git_directory_refuses_and_creates_no_stray_directories(tmp_path: Path) -> None:
+    bare = tmp_path / "not-a-clone"
+    bare.mkdir()
+    (bare / "Home.md").write_bytes(b"page")
+    stray = PendingManifest(manifest_path(bare / ".git"), workdir=bare)
+    with pytest.raises(GithubWikiError) as error:
+        stray.record(["Home.md"])
+    assert error.value.code == "sync.workdir_not_clone"
+    assert error.value.context["workdir"] == bare
+    assert sorted(entry.name for entry in bare.iterdir()) == ["Home.md"]  # no .git/wikiops trees
+
+
+def test_record_below_a_missing_nested_git_directory_creates_none_of_the_parents(tmp_path: Path) -> None:
+    bare = tmp_path / "wd"
+    (bare / "sub").mkdir(parents=True)
+    (bare / "Home.md").write_bytes(b"page")
+    stray = PendingManifest(manifest_path(bare / "sub" / "gitdir"), workdir=bare)
+    with pytest.raises(GithubWikiError) as error:
+        stray.record(["Home.md"])
+    assert error.value.code == "sync.workdir_not_clone"
+    assert list((bare / "sub").iterdir()) == []
 
 
 def test_record_is_all_or_nothing(workdir: Path, manifest: PendingManifest) -> None:
@@ -530,6 +596,25 @@ def test_discard_removes_committed_paths_and_ignores_unknown_ones(
     manifest.record(["A.md", "B.md"])
     manifest.discard(["A.md", "Never-recorded.md"])
     assert manifest.entries() == {"B.md": sha(b"b")}
+
+
+def test_discard_reads_a_one_shot_iterable_once_and_forgets_every_path_in_it(
+    workdir: Path, manifest: PendingManifest
+) -> None:
+    for name in ("A.md", "B.md", "C.md"):
+        write(workdir, name, name.encode())
+    manifest.record(["A.md", "B.md", "C.md"])
+    manifest.discard(name for name in ("A.md", "B.md"))
+    assert manifest.entries() == {"C.md": sha(b"C.md")}
+
+
+def test_discard_accepts_a_generator_that_names_only_unknown_paths(
+    workdir: Path, manifest: PendingManifest
+) -> None:
+    write(workdir, "A.md")
+    manifest.record(["A.md"])
+    manifest.discard(name for name in ("Other.md", "More.md"))
+    assert list(manifest.entries()) == ["A.md"]
 
 
 def test_discard_of_nothing_known_does_not_rewrite_the_file(

@@ -24,7 +24,7 @@ from wikiops.providers.github_wiki.workdir import (
     state_directory,
 )
 
-posix_only = pytest.mark.skipif(os.name != "posix", reason="POSIX permission semantics")
+posix_only = pytest.mark.skipif(os.name != "posix", reason="symlinks and permission bits are POSIX-only")
 not_root = pytest.mark.skipif(
     hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores permission bits"
 )
@@ -76,6 +76,7 @@ def test_tilde_is_expanded_against_home(tmp_path: Path) -> None:
     assert result == (tmp_path / "home" / "wikis" / "one").resolve()
 
 
+@posix_only
 def test_symlinked_workdir_is_resolved_to_its_real_path(tmp_path: Path) -> None:
     real = tmp_path / "real"
     real.mkdir()

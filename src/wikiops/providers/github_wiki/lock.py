@@ -30,6 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from wikiops.providers.github_wiki.errors import GithubWikiError
+from wikiops.providers.github_wiki.workdir import ensure_state_directory
 
 _HOLDER_READ_LIMIT = 4096
 _OPEN_FLAGS = (
@@ -112,7 +113,7 @@ class WorkdirLock:
 
     def _open(self) -> int:
         try:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
+            ensure_state_directory(self._path.parent, workdir=self._workdir)
             return os.open(self._path, _OPEN_FLAGS, 0o600)
         except OSError as exc:
             raise self._unusable("opened", exc) from exc

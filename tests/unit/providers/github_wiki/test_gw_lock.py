@@ -35,7 +35,7 @@ posix_only = pytest.mark.skipif(os.name != "posix", reason="symlink semantics ar
 @pytest.fixture
 def workdir(tmp_path: Path) -> Path:
     path = tmp_path / "wd"
-    path.mkdir()
+    (path / ".git").mkdir(parents=True)  # the lock lives inside an existing git directory
     return path
 
 
@@ -305,6 +305,30 @@ def test_a_lock_held_by_another_process_blocks_and_a_killed_holder_never_does(
 
 
 # -- failures to take the lock ------------------------------------------------
+
+
+def test_a_missing_git_directory_is_refused_and_nothing_is_created(tmp_path: Path) -> None:
+    bare = tmp_path / "not-a-clone"
+    bare.mkdir()
+    with pytest.raises(GithubWikiError) as error:
+        WorkdirLock(bare / ".git" / "wikiops" / "lock", workdir=bare).acquire()
+    assert error.value.code == "sync.workdir_not_clone"
+    assert error.value.context["workdir"] == bare
+    assert list(bare.iterdir()) == []  # no stray .git/wikiops tree
+
+
+def test_a_failed_acquire_for_a_missing_git_directory_leaves_the_lock_unheld(tmp_path: Path) -> None:
+    bare = tmp_path / "not-a-clone"
+    bare.mkdir()
+    candidate = WorkdirLock(bare / ".git" / "wikiops" / "lock", workdir=bare)
+    with pytest.raises(GithubWikiError):
+        candidate.acquire()
+    assert not candidate.held
+    (bare / ".git").mkdir()  # the clone appears later: the same instance now succeeds
+    candidate.acquire()
+    assert candidate.held
+    candidate.release()
+
 
 
 def test_a_lock_path_below_a_regular_file_is_unusable(tmp_path: Path, workdir: Path) -> None:

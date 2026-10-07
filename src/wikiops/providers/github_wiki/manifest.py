@@ -33,6 +33,7 @@ from typing import NoReturn
 from wikiops.providers._fs import FsError, atomic_write_bytes, content_version, ensure_within_root
 from wikiops.providers.github_wiki.errors import GithubWikiError
 from wikiops.providers.github_wiki.text import has_control_characters
+from wikiops.providers.github_wiki.workdir import ensure_state_directory
 
 MANIFEST_VERSION = 1
 MAX_REPORTED_PATHS = 20
@@ -60,6 +61,12 @@ def parse_status(text: str) -> tuple[str, ...]:
     either status column) is followed by an extra NUL-separated field holding the
     origin, and both paths are returned. Paths are taken verbatim (``-z`` never
     quotes them).
+
+    A trailing ``/`` marks a collapsed untracked directory (git reports a nested
+    repository that way even with ``--untracked-files=all``). It is kept as given:
+    a directory is never one of wikiops' page paths, so it classifies as foreign.
+    Any other entry kind ending in ``/`` is not something git emits and is
+    rejected as malformed.
     """
     fields = text.split("\0")
     if fields and fields[-1] == "":
@@ -72,7 +79,10 @@ def parse_status(text: str) -> tuple[str, ...]:
         if len(entry) < 4 or entry[2] != " ":
             _malformed_status(entry)
         status = entry[:2]
-        paths.append(entry[3:])
+        path = entry[3:]
+        if path.endswith("/") and status != "??":
+            _malformed_status(entry)
+        paths.append(path)
         if "R" in status or "C" in status:
             if index >= len(fields) or not fields[index]:
                 _malformed_status(entry)
@@ -168,7 +178,7 @@ class PendingManifest:
         payload = json.dumps({"version": MANIFEST_VERSION, "paths": dict(sorted(entries.items()))}, indent=2)
         try:
             directory = self._path.parent
-            directory.mkdir(parents=True, exist_ok=True)
+            ensure_state_directory(directory, workdir=self._workdir)
             root = directory.resolve()
             atomic_write_bytes(root / self._path.name, f"{payload}\n".encode(), root_real=root)
         except (OSError, FsError) as exc:
@@ -267,6 +277,7 @@ class PendingManifest:
     def discard(self, paths: Iterable[str]) -> None:
         """Forget ``paths`` (they were committed); unknown paths are ignored."""
         entries = self.entries()
-        kept = {path: digest for path, digest in entries.items() if path not in set(paths)}
+        forgotten = set(paths)  # materialized once: ``paths`` may be a one-shot iterator
+        kept = {path: digest for path, digest in entries.items() if path not in forgotten}
         if len(kept) != len(entries):
             self._save(kept)

@@ -316,3 +316,22 @@ def manifest_path(git_dir: Path) -> Path:
 
 def lock_path(git_dir: Path) -> Path:
     return state_directory(git_dir) / LOCK_FILENAME
+
+
+def ensure_state_directory(directory: Path, *, workdir: Path) -> None:
+    """Create ``directory`` (``<git dir>/wikiops``) inside a git directory that already exists.
+
+    Only the state directory itself is created, never its parents: a missing git
+    directory means the workdir is not a clone, and inventing ``.git/wikiops``
+    would leave a stray tree that later looks like a half-made clone. Other
+    ``OSError`` causes (the git directory is a file, permissions) propagate for
+    the caller to report as ``workdir.unusable``.
+    """
+    try:
+        directory.mkdir(exist_ok=True)
+    except FileNotFoundError as exc:
+        raise GithubWikiError(
+            "sync.workdir_not_clone",
+            "The workdir has no git directory to keep wikiops state in",
+            context={"workdir": workdir, "git_dir": directory.parent},
+        ) from exc
