@@ -65,9 +65,14 @@ class GitTransport:
 
 
 class CredentialStrategy(Protocol):
-    """Supplies credentials for exactly one auth mode, fresh for every command."""
+    """Supplies credentials for exactly one auth mode, fresh for every command.
+
+    ``remote_url`` is the credential-free remote of the mode, derived from the
+    settings alone: reading it never runs a command or touches a credential.
+    """
 
     label: str
+    remote_url: str
 
     def check_offline(self) -> None:
         """Fail with an ``auth.*`` / ``config.*`` error when the mode cannot work."""
