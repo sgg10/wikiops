@@ -146,7 +146,7 @@ def test_identical_content_produces_no_empty_commit(wiki: PublisherHarness) -> N
     outcome = wiki.publish(["Home.md"])
 
     assert wiki.fake.commits == []
-    assert wiki.argvs("diff") == [("git", "--literal-pathspecs", "diff", "--cached", "--quiet", "--", "Home.md")]
+    assert not {"add", "diff", "commit"} & set(wiki.subcommands())  # git status already said: nothing differs
     assert outcome.committed is False and outcome.sha is None and outcome.error is None
     assert outcome.note == ""
     assert wiki.manifest.entries() == {}  # nothing left pending
@@ -159,7 +159,7 @@ def test_a_changed_page_is_committed_where_an_unchanged_one_is_not(wiki: Publish
     outcome = wiki.publish(["Changed.md", "Same.md"])
 
     assert outcome.committed is True
-    assert wiki.fake.commits[0].paths == ("Changed.md", "Same.md")  # git decides what differs
+    assert wiki.fake.commits[0].paths == ("Changed.md", "Same.md")  # the whole stage set, once one is dirty
 
 
 # -- manifest ----------------------------------------------------------------------------------
@@ -515,32 +515,36 @@ def test_a_mixed_apply_with_a_changed_page_still_fails_on_the_template_before_st
     assert "add" not in wiki.subcommands() and wiki.fake.staged == set()
 
 
-def test_when_git_finds_a_difference_the_status_missed_the_message_is_rendered_then(
+def test_a_clean_stage_set_runs_no_staging_command_whatever_the_template_is(
     wiki: PublisherHarness,
 ) -> None:
-    (wiki.workdir / "Home.md").write_text("# same as HEAD\n")  # status says clean ...
-    wiki.manifest.record(["Home.md"])
-    wiki.fake.fail["diff"] = (1, "")  # ... but the staged diff says it differs
-
-    with wiki.lock.hold("apply"):
-        outcome = broken_publisher(wiki).publish(["Home.md"], plugin_id="p", page_count=1)
-
-    assert outcome.error is not None and outcome.error.code == "config.invalid_message"  # never recoded
-    assert "written but not committed" in str(outcome.error)
-    assert wiki.fake.commits == []
-
-
-def test_when_git_finds_a_difference_the_status_missed_the_valid_message_is_committed(
-    wiki: PublisherHarness,
-) -> None:
+    # git status is the authority on what differs from HEAD: with nothing dirty there is
+    # nothing to stage, to commit or to render, even if a later `diff --cached` would disagree.
     (wiki.workdir / "Home.md").write_text("# same as HEAD\n")
     wiki.manifest.record(["Home.md"])
     wiki.fake.fail["diff"] = (1, "")
 
-    outcome = wiki.publish(["Home.md"])
+    with wiki.lock.hold("apply"):
+        outcome = broken_publisher(wiki).publish(["Home.md"], plugin_id="p", page_count=1)
 
-    assert outcome.error is None and outcome.committed is True
-    assert wiki.fake.commits[0].message == "docs(wiki): update via wikiops plugin azure-docs"
+    assert outcome.error is None and outcome.committed is False and wiki.fake.commits == []
+    assert not {"add", "diff", "commit"} & set(wiki.subcommands())
+    assert wiki.fake.staged == set()
+    assert wiki.manifest.entries() == {}
+
+
+def test_a_message_failure_never_leaves_a_staged_path_whatever_git_reports_afterwards(
+    wiki: PublisherHarness,
+) -> None:
+    wiki.write("Home.md")
+    wiki.fake.fail["diff"] = (1, "")  # whatever a later diff says, the template fails first
+
+    with wiki.lock.hold("apply"):
+        outcome = broken_publisher(wiki).publish(["Home.md"], plugin_id="p", page_count=1)
+
+    assert outcome.error is not None and outcome.error.code == "config.invalid_message"
+    assert wiki.fake.staged == set()
+    assert not {"add", "diff", "commit"} & set(wiki.subcommands())
 
 
 def test_a_valid_message_is_rendered_once_before_the_first_staging_command(

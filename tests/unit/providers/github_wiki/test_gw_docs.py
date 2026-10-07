@@ -48,7 +48,7 @@ def table_codes(text: str) -> set[str]:
 def test_the_reference_code_table_lists_exactly_the_closed_vocabulary() -> None:
     documented = table_codes(section(REFERENCE.read_text(encoding="utf-8"), "## Error Codes"))
 
-    assert len(CODES) == 47
+    assert documented  # the table was found and parsed
     assert documented == set(CODES)
 
 

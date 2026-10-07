@@ -9,12 +9,16 @@ files, and turns them into at most one commit and at most one push:
   ``git --literal-pathspecs commit -- <paths>`` (``--only`` semantics), so a
   foreign staged, ignored or untracked path can never ride along. There is no
   ``add -A``, ``add .`` or ``commit -a`` and no pathless form anywhere.
-* Idempotent. When the staged paths do not differ from ``HEAD`` no commit is made.
+* Idempotent. ``git status`` decides, before anything is staged, whether a stage path
+  differs from ``HEAD``: when none does there is nothing to stage, commit or render, so
+  no commit is made and the commit template is never needed.
 * Identity per invocation. ``git`` mode adds nothing (git's own user or
   ``commit.identity_missing``); ``bot`` and ``custom`` pass ``GIT_AUTHOR_*`` and
   ``GIT_COMMITTER_*`` in the environment of the one command, so the clone's git
   configuration is never touched. Local commands carry no credentials and keep
   the user's hooks.
+* Nothing staged on failure. The commit message is rendered before the first ``add``, so a
+  template error (``config.invalid_message``) leaves no staged path behind.
 * Honest manifest. Written paths are recorded before anything can fail; committed
   paths are removed; a failed commit leaves them pending with the staged state
   untouched for inspection.
@@ -30,9 +34,8 @@ commit. Problems with the manifest itself (``workdir.manifest_corrupt``) are rai
 
 from __future__ import annotations
 
-import functools
 import string
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -187,22 +190,13 @@ class Publisher:
         sha: str | None = None
         committed = False
         if stage:
-            render = functools.cache(
-                lambda: render_commit_message(
-                    self._commit.message,
-                    plugin_id=plugin_id,
-                    provider_name=self._provider_name,
-                    page_count=page_count,
-                )
-            )
+            paths = [item.path for item in stage]
             try:
-                if not dirty_paths.isdisjoint(item.path for item in stage):
-                    render()  # something will be committed: a bad template fails before any staging
-                committed = self._stage_and_commit([item.path for item in stage], render)
+                committed = self._commit_if_dirty(paths, dirty_paths, plugin_id, page_count)
             except GithubWikiError as error:
                 return self._outcome(stage, committed=False, error=self._commit_failure(error))
             # Committed now, or identical to HEAD already: either way nothing stays pending.
-            self._manifest.discard(item.path for item in stage)
+            self._manifest.discard(paths)
             if committed:
                 try:
                     sha = self._head()
@@ -234,12 +228,25 @@ class Publisher:
         origins.update({path: "written" for path in written})
         return tuple(PathResult(path, origins[path], False) for path in sorted(origins))
 
-    def _stage_and_commit(self, paths: list[str], render_message: Callable[[], str]) -> bool:
-        """Stage ``paths`` and commit them; ``False`` when they do not differ from HEAD.
+    def _commit_if_dirty(
+        self, paths: list[str], dirty: set[str], plugin_id: str, page_count: int
+    ) -> bool:
+        """Commit ``paths`` when git status says one of them differs; ``False`` when none does.
 
-        The message is rendered only when there is something to commit, so an apply whose
-        pages already match HEAD never fails on the template.
+        One rule: ``git status`` decides, before anything is staged. With no dirty path there is
+        nothing to stage, to commit or to render, so an apply that rewrote pages identical to
+        HEAD never fails on the commit template. With a dirty path the message is rendered
+        FIRST, so a template error leaves nothing staged; then the paths are staged and, unless
+        git finds them identical to HEAD after all, committed in one commit.
         """
+        if dirty.isdisjoint(paths):
+            return False
+        message = render_commit_message(
+            self._commit.message,
+            plugin_id=plugin_id,
+            provider_name=self._provider_name,
+            page_count=page_count,
+        )
         self._git.local("add", paths=paths, op="add")
         staged = self._git.local("diff", "--cached", "--quiet", paths=paths, check=False)
         if staged.timed_out or staged.returncode not in (0, 1):
@@ -252,7 +259,7 @@ class Publisher:
         if staged.returncode == 0:
             return False
         self._git.local(
-            "commit", "-m", render_message(), paths=paths, op="commit", env=_identity_environment(self._commit)
+            "commit", "-m", message, paths=paths, op="commit", env=_identity_environment(self._commit)
         )
         return True
 
