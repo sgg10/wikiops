@@ -172,6 +172,27 @@ class WikiSync:
         self._state = state
         return state
 
+    def peek(self) -> SyncState | None:
+        """Describe an existing clone without changing anything (for ``describe_target``).
+
+        Returns the cached state after a sync. Otherwise, when the workdir already
+        holds a clone, verifies its identity and reads the branch, the unpushed
+        count and the pending paths with local read-only git commands: no network,
+        no credential, no lock and no write, and the instance is not marked as
+        synced. ``None`` when there is no clone yet (nothing is run) or when no
+        branch can be named (detached HEAD without an override or ``origin/HEAD``).
+        """
+        if self._state is not None:
+            return self._state
+        if not (self._git.workdir / ".git").exists():
+            return None
+        self._verify_identity()
+        self._open_state_files()
+        branch = self._branch_override or self._origin_head() or self._current_branch()
+        if branch is None:
+            return None
+        return self._snapshot(branch, offline=True)
+
     # -- the two paths -----------------------------------------------------------
 
     def _offline_sync(self) -> SyncState:
