@@ -6,7 +6,8 @@ that its mode can work, and builds a fresh ``GitTransport`` for every network
 command: nothing is cached, so two profiles in one process never share a token.
 HTTPS modes inject the token through ``GIT_CONFIG_COUNT/KEY/VALUE`` environment
 entries appended after the user's own, so it never reaches argv, a URL or any
-file git writes.
+file git writes. Every transport disables git's terminal prompt, so a missing or
+rejected credential fails fast instead of waiting for input.
 """
 
 from __future__ import annotations
@@ -32,6 +33,11 @@ from wikiops.providers.github_wiki.settings import (
 
 _TOKEN_USER = "x-access-token"
 _SSH_CONNECT_TIMEOUT_SECONDS = 15
+# ``gh auth token`` reads a local credential store: it is quick or it is stuck,
+# so it never gets the (much longer) budget of a network git command.
+GH_TOKEN_TIMEOUT_SECONDS = 15.0
+# Never prompt for credentials on a terminal, on any transport.
+_NO_PROMPT = {"GIT_TERMINAL_PROMPT": "0"}
 # Variables that could expose or replace a credential on a network command.
 _ISOLATED_VARIABLES = (
     "GIT_ASKPASS",
@@ -77,17 +83,27 @@ def _isolation_overrides(environ: Mapping[str, str]) -> dict[str, str | None]:
 def _https_transport(
     remote_url: str, label: str, host: str, token: str, environ: Mapping[str, str]
 ) -> GitTransport:
-    """Token transport: an extra HTTPS header for ``host`` and no credential helper."""
+    """Token transport: an extra HTTPS header for ``host`` and no credential helper.
+
+    ``http.<url>.extraheader`` is multi-valued, so the entry is preceded by an
+    empty value for the same key: git clears every header collected so far,
+    and another profile's ``Authorization`` header (from a config file or an
+    inherited ``GIT_CONFIG_*`` entry) can never be sent alongside this token.
+    """
     pair = f"{_TOKEN_USER}:{token}"
     basic = base64.b64encode(pair.encode("utf-8")).decode("ascii")
     first = _inherited_config_count(environ)
+    header_key = f"http.https://{host}/.extraheader"
     overrides: dict[str, str | None] = {
         **_isolation_overrides(environ),
-        "GIT_CONFIG_COUNT": str(first + 2),
-        f"GIT_CONFIG_KEY_{first}": f"http.https://{host}/.extraheader",
-        f"GIT_CONFIG_VALUE_{first}": f"AUTHORIZATION: basic {basic}",
-        f"GIT_CONFIG_KEY_{first + 1}": "credential.helper",
-        f"GIT_CONFIG_VALUE_{first + 1}": "",
+        **_NO_PROMPT,
+        "GIT_CONFIG_COUNT": str(first + 3),
+        f"GIT_CONFIG_KEY_{first}": header_key,
+        f"GIT_CONFIG_VALUE_{first}": "",
+        f"GIT_CONFIG_KEY_{first + 1}": header_key,
+        f"GIT_CONFIG_VALUE_{first + 1}": f"AUTHORIZATION: basic {basic}",
+        f"GIT_CONFIG_KEY_{first + 2}": "credential.helper",
+        f"GIT_CONFIG_VALUE_{first + 2}": "",
     }
     return GitTransport(remote_url, overrides, (token, pair, basic), label)
 
@@ -138,7 +154,7 @@ class GhTokenStrategy:
         account: str,
         *,
         runner: GitRunner,
-        timeout: float,
+        timeout: float = GH_TOKEN_TIMEOUT_SECONDS,
         which: Which = shutil.which,
         environ: Mapping[str, str] | None = None,
     ) -> None:
@@ -228,6 +244,7 @@ class SshStrategy:
         if self._key is not None:
             command += f" -i {shlex.quote(self._key)} -o IdentitiesOnly=yes"
         overrides: dict[str, str | None] = {
+            **_NO_PROMPT,
             "GIT_SSH_COMMAND": command,
             "GIT_SSH_VARIANT": "ssh",
         }
@@ -247,7 +264,10 @@ class AmbientStrategy:
 
     def transport(self) -> GitTransport:
         return GitTransport(
-            self.remote_url, {"GCM_INTERACTIVE": "never"}, (), self.label
+            self.remote_url,
+            {**_NO_PROMPT, "GCM_INTERACTIVE": "never"},
+            (),
+            self.label,
         )
 
 
@@ -258,7 +278,12 @@ def build_strategy(
     environ: Mapping[str, str] | None = None,
     which: Which = shutil.which,
 ) -> EnvTokenStrategy | GhTokenStrategy | SshStrategy | AmbientStrategy:
-    """Return the strategy of ``settings.auth``; no other mode is ever consulted."""
+    """Return the strategy of ``settings.auth``; no other mode is ever consulted.
+
+    An auth value that is none of the four modes is a coded error, never a
+    silent fallback to ambient credentials (this is an explicit check, not an
+    ``assert``, so it also holds under ``python -O``).
+    """
     host, repository, auth = settings.host, settings.repository, settings.auth
     if isinstance(auth, EnvAuth):
         return EnvTokenStrategy(host, repository, auth.variable, environ=environ)
@@ -268,11 +293,16 @@ def build_strategy(
             repository,
             auth.account,
             runner=runner,
-            timeout=settings.git_timeout_seconds,
+            timeout=min(settings.git_timeout_seconds, GH_TOKEN_TIMEOUT_SECONDS),
             which=which,
             environ=environ,
         )
     if isinstance(auth, SshAuth):
         return SshStrategy(host, repository, auth.key_path)
-    assert isinstance(auth, AmbientAuth)
-    return AmbientStrategy(host, repository)
+    if isinstance(auth, AmbientAuth):
+        return AmbientStrategy(host, repository)
+    raise GithubWikiError(
+        "config.invalid",
+        f"Unsupported auth mode '{getattr(auth, 'mode', type(auth).__name__)}'",
+        hint="set auth.mode to one of: env | gh | ssh | ambient",
+    )

@@ -15,7 +15,9 @@ MASK = "***"
 
 _TOKEN_USER = "x-access-token"
 _AUTHORIZATION_HEADER = re.compile(r"authorization:[ \t]*[A-Za-z]+[ \t]+\S+", re.IGNORECASE)
-_URL_USER_INFO = re.compile(r"(?<=://)[^/@\s'\"]+@")
+# User-info ends at the LAST '@' of the authority, so an '@' inside the
+# password is masked too (greedy match up to the next '/', space or quote).
+_URL_USER_INFO = re.compile(r"(?<=://)[^/\s'\"]+@")
 
 
 def _forms(secret: str) -> set[str]:

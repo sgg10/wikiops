@@ -24,6 +24,12 @@ NAMESPACE = "github_wiki"
 # whitespace around it, folds into one separator.
 _LINE_BREAKS = re.compile(r"\s*(?:\r\n|[\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029])+\s*")
 _CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+# Characters that render as nothing or reorder surrounding text: bidi marks,
+# embeddings, overrides and isolates, plus zero-width and joiner characters.
+# Left raw they let user-controlled text spoof the rest of a message.
+_INVISIBLE_CHARACTERS = re.compile(
+    "[\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]"
+)
 
 
 @dataclass(frozen=True)
@@ -159,9 +165,9 @@ def _escape_control(match: re.Match[str]) -> str:
 
 
 def _one_line(value: object) -> str:
-    """Fold line breaks to `` | `` and escape any remaining control character."""
+    """Fold line breaks to `` | `` and escape control, bidi and zero-width characters."""
     folded = _LINE_BREAKS.sub(" | ", str(value).strip())
-    return _CONTROL_CHARACTERS.sub(_escape_control, folded)
+    return _INVISIBLE_CHARACTERS.sub(_escape_control, _CONTROL_CHARACTERS.sub(_escape_control, folded))
 
 
 def _effective_hint(spec: CodeSpec, hint: str | None) -> str:

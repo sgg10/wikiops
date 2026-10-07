@@ -13,15 +13,24 @@ pinned to ``C`` (stable stderr for the classifier) and ``GIT_CEILING_DIRECTORIES
 at the workdir's parent, so git can never wander into an enclosing repository.
 ``cwd`` is the only working-directory authority; ``-C`` is never used. Failures
 are classified into coded errors with a redacted stderr tail.
+
+A clone is staged in a hidden sibling directory and renamed onto the workdir
+only after git succeeded: a failure or timeout never leaves a partial workdir
+behind (which a later run would have to classify as a broken clone).
 """
 
 from __future__ import annotations
 
+import contextlib
+import os
+import secrets
+import shutil
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 from wikiops.providers.github_wiki.classifier import classify
+from wikiops.providers.github_wiki.errors import GithubWikiError
 from wikiops.providers.github_wiki.ports import (
     CommandResult,
     CredentialStrategy,
@@ -126,22 +135,70 @@ class Git:
         )
 
     def clone(self, branch: str, *, context: Mapping[str, object] | None = None) -> CommandResult:
-        """Clone ``branch`` into the workdir (from its parent, which must exist)."""
-        return self._network(
-            "clone",
-            lambda remote: (
-                "--no-tags",
-                "--origin",
-                "origin",
-                "--branch",
-                branch,
-                "--",
-                remote,
-                str(self._workdir),
-            ),
-            cwd=self._workdir.parent,
-            context=context,
+        """Clone ``branch`` into the workdir (its parent must exist).
+
+        git clones into a fresh sibling directory (same filesystem), which is
+        renamed onto the workdir once the clone succeeded; on any failure the
+        staging directory is removed and the workdir is left as it was. A
+        workdir that is not an empty directory is refused before any network
+        command runs (``sync.workdir_not_clone``).
+        """
+        self._require_clone_target()
+        staging = self._workdir.parent / f".{self._workdir.name}.clone-{secrets.token_hex(6)}"
+        try:
+            staging.mkdir()
+        except OSError as exc:
+            raise GithubWikiError(
+                "workdir.unusable",
+                "Cannot create a staging directory next to the workdir for the clone",
+                context={"workdir": str(self._workdir), "reason": exc.strerror or str(exc)},
+            ) from exc
+        try:
+            result = self._network(
+                "clone",
+                lambda remote: (
+                    "--no-tags",
+                    "--origin",
+                    "origin",
+                    "--branch",
+                    branch,
+                    "--",
+                    remote,
+                    str(staging),
+                ),
+                cwd=self._workdir.parent,
+                context=context,
+            )
+            self._publish_clone(staging)
+        except BaseException:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+        return result
+
+    def _require_clone_target(self) -> None:
+        """The workdir must be missing or an empty directory; nothing is ever overwritten."""
+        if self._workdir.is_dir() and not any(self._workdir.iterdir()):
+            return
+        if not self._workdir.exists() and not self._workdir.is_symlink():
+            return
+        raise self._not_a_clone_target()
+
+    def _not_a_clone_target(self) -> GithubWikiError:
+        return GithubWikiError(
+            "sync.workdir_not_clone",
+            "The workdir exists and is not an empty directory, so it cannot be cloned into",
+            context={"workdir": str(self._workdir)},
         )
+
+    def _publish_clone(self, staging: Path) -> None:
+        """Rename the finished clone onto the workdir; a workdir that filled up wins."""
+        if os.name != "posix":  # pragma: no cover - Windows cannot rename onto an existing directory
+            with contextlib.suppress(OSError):
+                self._workdir.rmdir()
+        try:
+            os.replace(staging, self._workdir)
+        except OSError as exc:
+            raise self._not_a_clone_target() from exc
 
     def fetch(self, branch: str, *, context: Mapping[str, object] | None = None) -> CommandResult:
         """Fetch ``branch`` into its remote-tracking ref; tags are never fetched."""

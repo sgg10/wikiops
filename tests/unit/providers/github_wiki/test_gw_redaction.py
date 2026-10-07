@@ -113,8 +113,27 @@ def test_a_git_config_echo_of_the_extraheader_is_masked() -> None:
             f"fatal: unable to access 'https://{MASK}@ghe.io/o/r/': 403",
         ),
         ("ssh://git@github.com/o/r.git", f"ssh://{MASK}@github.com/o/r.git"),
+        # An '@' inside the password: the user-info ends at the LAST '@' of the authority.
+        ("https://user:p@ss@github.com/o/r", f"https://{MASK}@github.com/o/r"),
+        ("https://user:p@@ss@github.com/o/r", f"https://{MASK}@github.com/o/r"),
+        ("https://u:a@b@c:d@ghe.io:8443/o/r.git", f"https://{MASK}@ghe.io:8443/o/r.git"),
+        (
+            "fatal: unable to access 'https://x:pa@ss@github.com/o/r/': 403",
+            f"fatal: unable to access 'https://{MASK}@github.com/o/r/': 403",
+        ),
+        ("remote: https://user:p@ss", f"remote: https://{MASK}@ss"),
     ],
-    ids=["user-password", "token-only", "inside-a-sentence", "ssh-scheme"],
+    ids=[
+        "user-password",
+        "token-only",
+        "inside-a-sentence",
+        "ssh-scheme",
+        "at-in-password",
+        "double-at-in-password",
+        "several-ats-and-port",
+        "at-in-password-inside-a-sentence",
+        "truncated-url",
+    ],
 )
 def test_url_user_info_is_masked(text: str, expected: str) -> None:
     assert Redactor(()).redact(text) == expected
@@ -126,8 +145,10 @@ def test_url_user_info_is_masked(text: str, expected: str) -> None:
         "https://github.com/o/r.wiki.git",
         "git@github.com:o/r.wiki.git",
         "contact me@example.com about https://github.com/o/r",
+        "https://github.com/o/r mailed to a@b.example",
+        "https://github.com/o/r.wiki.git\nsee also a@b.example/path",
     ],
-    ids=["https-no-userinfo", "scp-style-ssh", "email-outside-a-url"],
+    ids=["https-no-userinfo", "scp-style-ssh", "email-outside-a-url", "email-after-url", "email-on-next-line"],
 )
 def test_text_without_url_user_info_is_left_alone(text: str) -> None:
     assert Redactor(()).redact(text) == text

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import builtins
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -124,6 +125,59 @@ def test_strategies_expose_what_the_credential_strategy_port_declares(auth: dict
 )
 def test_build_strategy_selects_the_configured_mode(auth: dict | None, expected: type) -> None:
     assert type(strategy_for(auth)) is expected
+
+
+def test_an_unsupported_auth_mode_fails_loudly_instead_of_falling_back_to_ambient() -> None:
+    # model_construct bypasses validation: the guard must be an explicit coded
+    # error, not an `assert` that `python -O` strips (silent ambient fallback).
+    settings = settings_for({"mode": "ambient"}).model_construct(
+        repository="acme/platform", host="github.com", auth=SimpleNamespace(mode="oauth")
+    )
+
+    with pytest.raises(GithubWikiError) as caught:
+        build_strategy(settings, runner=FakeGitRunner())
+
+    assert caught.value.code == "config.invalid"
+    assert "oauth" in str(caught.value)
+
+
+@pytest.mark.parametrize("auth", [None, object(), "ambient"])
+def test_any_non_strategy_auth_value_is_rejected(auth: object) -> None:
+    settings = settings_for({"mode": "ambient"}).model_construct(
+        repository="acme/platform", host="github.com", auth=auth
+    )
+
+    with pytest.raises(GithubWikiError) as caught:
+        build_strategy(settings, runner=FakeGitRunner())
+
+    assert caught.value.code == "config.invalid"
+
+
+# -- gh token lookup has its own short budget ----------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("git_timeout", "expected"),
+    [(120, 15.0), (3600, 15.0), (15, 15.0), (10, 10.0), (5, 5.0)],
+)
+def test_the_gh_token_lookup_uses_a_short_timeout_never_above_the_git_budget(
+    git_timeout: int, expected: float
+) -> None:
+    runner = FakeGitRunner()
+    runner.script(["gh", "auth", "token"], stdout=f"{TOKEN}\n")
+    raw = {
+        "repository": "acme/platform",
+        "provider_name": "wiki",
+        "auth": {"mode": "gh", "account": "sgg10"},
+        "git_timeout_seconds": git_timeout,
+    }
+    strategy = build_strategy(
+        parse_settings(raw), runner=runner, environ={}, which=lambda name: f"/usr/bin/{name}"
+    )
+
+    strategy.transport()
+
+    assert [call.timeout for call in runner.calls] == [expected]
 
 
 # -- labels ---------------------------------------------------------------------------

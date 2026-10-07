@@ -180,9 +180,10 @@ def test_network_commands_have_the_exact_argv_with_hooks_disabled_first(
         assert call.argv[:2] == ("git", "-c")
         assert call.argv[2].startswith("core.hooksPath=")
         shapes.append(call.argv[3:])
+    clone_destination = runner.calls[1].argv[-1]  # a sibling staging directory, see below
     assert shapes == [
         ("ls-remote", "--symref", REMOTE, "HEAD", "refs/heads/*"),
-        ("clone", "--no-tags", "--origin", "origin", "--branch", "master", "--", REMOTE, str(workdir)),
+        ("clone", "--no-tags", "--origin", "origin", "--branch", "master", "--", REMOTE, clone_destination),
         ("fetch", "--no-tags", "origin", "+refs/heads/master:refs/remotes/origin/master"),
         ("push", "--porcelain", "origin", "HEAD:refs/heads/master"),
     ]
@@ -259,6 +260,167 @@ def test_a_credential_failure_stops_the_network_command_before_git_runs(
 
     assert caught.value.code == "auth.env_missing"
     assert runner.calls == []
+
+
+# -- clone atomicity: a failed or timed-out clone never leaves a partial workdir --------
+
+
+def clone_into_destination(files: dict[str, str], *, returncode: int = 0, timed_out: bool = False):
+    """Responder that behaves like git: it writes into the clone destination, then answers."""
+
+    def respond(call: RecordedCall) -> CommandResult:
+        destination = Path(call.argv[-1])
+        assert destination.is_dir() and not any(destination.iterdir())  # git needs an empty dir
+        for name, content in files.items():
+            target = destination / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content)
+        return CommandResult(call.argv, returncode, "", "fatal: boom" if returncode else "", timed_out)
+
+    return respond
+
+
+def clone_git(responder, strategy: CountingStrategy, workdir: Path) -> tuple[Git, FakeGitRunner]:
+    runner = FakeGitRunner()
+    runner.script_with(["git"], responder)
+    return Git(runner, strategy, workdir=workdir, timeout=TIMEOUT), runner
+
+
+def test_clone_runs_in_a_sibling_staging_directory_and_publishes_it_atomically(
+    strategy: CountingStrategy, tmp_path: Path
+) -> None:
+    workdir = tmp_path / "cache" / "wiki"
+    workdir.parent.mkdir()
+    git, runner = clone_git(clone_into_destination({".git/HEAD": "ref", "Home.md": "# Home"}), strategy, workdir)
+
+    git.clone("master")
+
+    destination = Path(runner.calls[0].argv[-1])
+    assert destination != workdir
+    assert destination.parent == workdir.parent  # same filesystem: the rename is atomic
+    assert (workdir / "Home.md").read_text() == "# Home"
+    assert (workdir / ".git" / "HEAD").is_file()
+    assert [path.name for path in workdir.parent.iterdir()] == ["wiki"]  # staging is gone
+
+
+def test_clone_replaces_an_existing_empty_workdir(strategy: CountingStrategy, tmp_path: Path) -> None:
+    workdir = tmp_path / "cache" / "wiki"
+    workdir.mkdir(parents=True)
+    git, _ = clone_git(clone_into_destination({"Home.md": "# Home"}), strategy, workdir)
+
+    git.clone("master")
+
+    assert [path.name for path in workdir.iterdir()] == ["Home.md"]
+    assert [path.name for path in workdir.parent.iterdir()] == ["wiki"]
+
+
+@pytest.mark.parametrize(
+    ("returncode", "timed_out", "code"),
+    [(128, False, "sync.git_failed"), (0, True, "sync.timeout")],
+    ids=["failure", "timeout"],
+)
+def test_a_failed_or_timed_out_clone_leaves_no_workdir_and_no_staging_directory(
+    strategy: CountingStrategy, tmp_path: Path, returncode: int, timed_out: bool, code: str
+) -> None:
+    workdir = tmp_path / "cache" / "wiki"
+    workdir.parent.mkdir()
+    partial = {".git/objects/pack/partial": "half a pack", "Home.md": "# half"}
+    git, _ = clone_git(
+        clone_into_destination(partial, returncode=returncode, timed_out=timed_out), strategy, workdir
+    )
+
+    with pytest.raises(GithubWikiError) as caught:
+        git.clone("master")
+
+    assert caught.value.code == code
+    assert not workdir.exists()
+    assert list(workdir.parent.iterdir()) == []
+
+
+def test_a_failed_clone_keeps_an_existing_empty_workdir_untouched(
+    strategy: CountingStrategy, tmp_path: Path
+) -> None:
+    workdir = tmp_path / "cache" / "wiki"
+    workdir.mkdir(parents=True)
+    git, _ = clone_git(clone_into_destination({"Home.md": "x"}, returncode=128), strategy, workdir)
+
+    with pytest.raises(GithubWikiError):
+        git.clone("master")
+
+    assert workdir.is_dir() and list(workdir.iterdir()) == []
+    assert [path.name for path in workdir.parent.iterdir()] == ["wiki"]
+
+
+def test_cloning_into_a_non_empty_workdir_is_refused_before_any_network_command(
+    strategy: CountingStrategy, tmp_path: Path
+) -> None:
+    workdir = tmp_path / "cache" / "wiki"
+    workdir.mkdir(parents=True)
+    (workdir / "mine.txt").write_text("keep")
+    git, runner = clone_git(clone_into_destination({}), strategy, workdir)
+
+    with pytest.raises(GithubWikiError) as caught:
+        git.clone("master")
+
+    assert caught.value.code == "sync.workdir_not_clone"
+    assert runner.calls == []
+    assert strategy.issued == 0
+    assert (workdir / "mine.txt").read_text() == "keep"
+    assert [path.name for path in workdir.parent.iterdir()] == ["wiki"]
+
+
+def test_a_workdir_that_fills_up_during_the_clone_is_not_overwritten(
+    strategy: CountingStrategy, tmp_path: Path
+) -> None:
+    workdir = tmp_path / "cache" / "wiki"
+    workdir.parent.mkdir()
+    cloned = clone_into_destination({"Home.md": "# remote"})
+
+    def respond(call: RecordedCall) -> CommandResult:
+        result = cloned(call)
+        workdir.mkdir()  # someone else created the directory in the meantime
+        (workdir / "mine.txt").write_text("keep")
+        return result
+
+    git, _ = clone_git(respond, strategy, workdir)
+
+    with pytest.raises(GithubWikiError) as caught:
+        git.clone("master")
+
+    assert caught.value.code == "sync.workdir_not_clone"
+    assert [path.name for path in workdir.iterdir()] == ["mine.txt"]
+    assert [path.name for path in workdir.parent.iterdir()] == ["wiki"]
+
+
+def test_a_missing_parent_directory_is_workdir_unusable_and_runs_nothing(
+    strategy: CountingStrategy, tmp_path: Path
+) -> None:
+    workdir = tmp_path / "no-such-parent" / "wiki"
+    git, runner = clone_git(clone_into_destination({}), strategy, workdir)
+
+    with pytest.raises(GithubWikiError) as caught:
+        git.clone("master")
+
+    assert caught.value.code == "workdir.unusable"
+    assert runner.calls == []
+    assert not workdir.parent.exists()
+
+
+def test_each_clone_uses_its_own_staging_directory(strategy: CountingStrategy, tmp_path: Path) -> None:
+    destinations: list[str] = []
+    inner = clone_into_destination({"Home.md": "x"})
+
+    def respond(call: RecordedCall) -> CommandResult:
+        destinations.append(call.argv[-1])
+        return inner(call)
+
+    for name in ("one", "two"):
+        workdir = tmp_path / "cache" / name
+        workdir.parent.mkdir(exist_ok=True)
+        git, _ = clone_git(respond, strategy, workdir)
+        git.clone("master")
+
+    assert len(set(destinations)) == 2
 
 
 # -- the empty hooks directory ------------------------------------------------------------

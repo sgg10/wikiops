@@ -312,6 +312,66 @@ def test_other_control_characters_are_escaped_in_summary_hint_and_context(
     assert f"Hint: try {escaped}." in message
 
 
+@pytest.mark.parametrize(
+    ("raw", "escaped"),
+    [
+        ("a\u202eb", "a\\u202eb"),  # right-to-left override
+        ("a\u202db", "a\\u202db"),  # left-to-right override
+        ("a\u202ab", "a\\u202ab"),  # left-to-right embedding
+        ("a\u2066b\u2069", "a\\u2066b\\u2069"),  # isolates
+        ("a\u200eb\u200f", "a\\u200eb\\u200f"),  # directional marks
+        ("a\u061cb", "a\\u061cb"),  # Arabic letter mark
+        ("a\u200bb", "a\\u200bb"),  # zero-width space
+        ("a\u200cb\u200d", "a\\u200cb\\u200d"),  # zero-width (non-)joiner
+        ("a\u2060b", "a\\u2060b"),  # word joiner
+        ("a\ufeffb", "a\\ufeffb"),  # zero-width no-break space / BOM
+        ("a\x85b", "a\\x85b"),  # C1 next-line is folded by the line-break rule
+    ],
+    ids=[
+        "rlo",
+        "lro",
+        "lre",
+        "isolates",
+        "marks",
+        "alm",
+        "zwsp",
+        "zwj-zwnj",
+        "word-joiner",
+        "bom",
+        "nel",
+    ],
+)
+def test_bidi_and_zero_width_characters_are_escaped_in_summary_hint_and_context(
+    raw: str, escaped: str
+) -> None:
+    message = render_message(
+        "auth.rejected", f"Rejected {raw}", context={"value": raw}, hint=f"try {raw}"
+    )
+
+    assert_single_logical_line(message)
+    for invisible in "\u202e\u202d\u202a\u2066\u2069\u200e\u200f\u061c\u200b\u200c\u200d\u2060\ufeff":
+        assert invisible not in message
+    if raw != "a\x85b":
+        assert f"Rejected {escaped}." in message
+        assert f"value='{escaped}'" in message
+        assert f"Hint: try {escaped}." in message
+
+
+def test_a_spoofed_trailing_hint_cannot_hide_behind_a_bidi_override() -> None:
+    hostile = "ok\u202e .tnih ebyam"
+
+    message = render_message("auth.rejected", "Rejected", context={"path": hostile})
+
+    assert "\u202e" not in message
+    assert "path='ok\\u202e .tnih ebyam'" in message
+
+
+def test_ordinary_non_ascii_text_is_not_escaped() -> None:
+    message = render_message("auth.rejected", "Página ñandú 日本語 \U0001f600")
+
+    assert "Página ñandú 日本語 \U0001f600." in message
+
+
 def test_the_error_class_exposes_the_folded_message_and_the_raw_parts() -> None:
     error = GithubWikiError("auth.rejected", "bad\ninput", hint="do\nthis")
 

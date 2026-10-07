@@ -84,10 +84,46 @@ def test_https_transport_injects_the_token_as_a_host_scoped_extra_header(build) 
     transport = build().transport()
 
     assert config_entries(transport.env_overrides) == [
+        ("http.https://github.com/.extraheader", ""),
         ("http.https://github.com/.extraheader", f"AUTHORIZATION: basic {BASIC}"),
         ("credential.helper", ""),
     ]
-    assert transport.env_overrides["GIT_CONFIG_COUNT"] == "2"
+    assert transport.env_overrides["GIT_CONFIG_COUNT"] == "3"
+
+
+@pytest.mark.parametrize("build", HTTPS_STRATEGIES)
+def test_https_transport_resets_every_inherited_extra_header_before_adding_its_own(build) -> None:
+    # `http.<url>.extraheader` is multi-valued: an empty value clears all earlier
+    # headers, so another profile's Authorization header never rides along.
+    entries = config_entries(build().transport().env_overrides)
+    key = "http.https://github.com/.extraheader"
+
+    ours = [index for index, (name, value) in enumerate(entries) if name == key and value]
+    resets = [index for index, (name, value) in enumerate(entries) if name == key and not value]
+    assert len(ours) == 1
+    assert resets == [ours[0] - 1]
+
+
+@pytest.mark.parametrize("build", HTTPS_STRATEGIES)
+def test_the_extra_header_reset_follows_the_users_own_config_entries(build) -> None:
+    overrides = build(
+        inherited={
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
+            "GIT_CONFIG_VALUE_0": "AUTHORIZATION: basic b3RoZXItcHJvZmlsZQ==",
+        }
+    ).transport().env_overrides
+
+    # Index 0 is the user's own entry (inherited, not repeated here); ours follow it.
+    assert overrides["GIT_CONFIG_COUNT"] == "4"
+    assert [
+        (overrides[f"GIT_CONFIG_KEY_{i}"], overrides[f"GIT_CONFIG_VALUE_{i}"]) for i in (1, 2, 3)
+    ] == [
+        ("http.https://github.com/.extraheader", ""),
+        ("http.https://github.com/.extraheader", f"AUTHORIZATION: basic {BASIC}"),
+        ("credential.helper", ""),
+    ]
+    assert "GIT_CONFIG_KEY_0" not in overrides
 
 
 @pytest.mark.parametrize("build", HTTPS_STRATEGIES)
@@ -95,7 +131,11 @@ def test_https_transport_scopes_the_header_to_the_configured_host(build) -> None
     transport = build(host="ghe.acme.io").transport()
 
     keys = [key for key, _ in config_entries(transport.env_overrides)]
-    assert keys == ["http.https://ghe.acme.io/.extraheader", "credential.helper"]
+    assert keys == [
+        "http.https://ghe.acme.io/.extraheader",
+        "http.https://ghe.acme.io/.extraheader",
+        "credential.helper",
+    ]
     assert transport.remote_url == "https://ghe.acme.io/acme/platform.wiki.git"
 
 
@@ -129,11 +169,13 @@ def test_https_transport_appends_after_the_users_existing_config_entries(build) 
         }
     ).transport().env_overrides
 
-    assert overrides["GIT_CONFIG_COUNT"] == "4"
+    assert overrides["GIT_CONFIG_COUNT"] == "5"
     assert overrides["GIT_CONFIG_KEY_2"] == "http.https://github.com/.extraheader"
-    assert overrides["GIT_CONFIG_VALUE_2"] == f"AUTHORIZATION: basic {BASIC}"
-    assert overrides["GIT_CONFIG_KEY_3"] == "credential.helper"
-    assert overrides["GIT_CONFIG_VALUE_3"] == ""
+    assert overrides["GIT_CONFIG_VALUE_2"] == ""
+    assert overrides["GIT_CONFIG_KEY_3"] == "http.https://github.com/.extraheader"
+    assert overrides["GIT_CONFIG_VALUE_3"] == f"AUTHORIZATION: basic {BASIC}"
+    assert overrides["GIT_CONFIG_KEY_4"] == "credential.helper"
+    assert overrides["GIT_CONFIG_VALUE_4"] == ""
     assert not {"GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_KEY_1"} & set(overrides)
 
 
@@ -143,7 +185,7 @@ def test_an_unusable_inherited_config_count_is_treated_as_zero(count: str) -> No
         {"mode": "env", "variable": "T"}, environ={"T": TOKEN, "GIT_CONFIG_COUNT": count}
     )
 
-    assert strategy.transport().env_overrides["GIT_CONFIG_COUNT"] == "2"
+    assert strategy.transport().env_overrides["GIT_CONFIG_COUNT"] == "3"
 
 
 @pytest.mark.parametrize("build", HTTPS_STRATEGIES)
@@ -180,6 +222,30 @@ def test_https_transport_drops_trace_variables_even_when_not_inherited() -> None
 
     assert overrides["GIT_TRACE_CURL"] is None
     assert overrides["GIT_TRACE"] is None
+
+
+# -- no interactive prompt on any transport ---------------------------------------------
+
+ALL_STRATEGIES = [
+    *HTTPS_STRATEGIES,
+    pytest.param(lambda: make({"mode": "ssh"}), id="ssh"),
+    pytest.param(lambda: make({"mode": "ssh", "key_path": "/k/wiki"}), id="ssh-pinned"),
+    pytest.param(lambda: make({"mode": "ambient"}), id="ambient"),
+]
+
+
+@pytest.mark.parametrize("build", ALL_STRATEGIES)
+def test_every_transport_disables_terminal_prompts(build) -> None:
+    transport = build().transport()
+
+    assert transport.env_overrides["GIT_TERMINAL_PROMPT"] == "0"
+
+
+def test_the_ambient_transport_keeps_the_credential_manager_non_interactive() -> None:
+    overrides = make({"mode": "ambient"}).transport().env_overrides
+
+    assert overrides["GCM_INTERACTIVE"] == "never"
+    assert overrides["GIT_TERMINAL_PROMPT"] == "0"
 
 
 # -- env mode: variable re-read per command ---------------------------------------------
@@ -377,7 +443,10 @@ def test_ssh_never_carries_a_token_even_when_one_is_in_the_environment() -> None
 def test_ambient_adds_nothing_but_a_non_interactive_credential_manager() -> None:
     transport = make({"mode": "ambient"}, environ={"GITHUB_TOKEN": TOKEN}).transport()
 
-    assert dict(transport.env_overrides) == {"GCM_INTERACTIVE": "never"}
+    assert dict(transport.env_overrides) == {
+        "GCM_INTERACTIVE": "never",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
     assert transport.secrets == ()
     assert transport.label == "ambient"
     assert transport.remote_url == "https://github.com/acme/platform.wiki.git"
