@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
+from wikiops.providers.github_wiki import text
 from wikiops.providers.github_wiki.text import (
     escape_unsafe_characters,
     has_control_characters,
@@ -53,3 +56,37 @@ def test_unsafe_characters_are_escaped_visibly(raw: str, escaped: str) -> None:
 
 def test_text_without_unsafe_characters_is_returned_unchanged() -> None:
     assert escape_unsafe_characters("Página ñandú 日本語 \U0001f600") == "Página ñandú 日本語 \U0001f600"
+
+
+# -- the invisible-character set is spelled with escapes, never literal ------------
+
+INVISIBLE_CODE_POINTS = (
+    [0x00AD, 0x061C, 0x180E, 0xFEFF]
+    + list(range(0x200B, 0x2010))  # zero-width and directional marks
+    + list(range(0x202A, 0x202F))  # embeddings and overrides
+    + list(range(0x2060, 0x2065))  # word joiner and invisible operators
+    + list(range(0x2066, 0x206A))  # isolates
+)
+
+
+def test_the_text_module_source_is_plain_ascii() -> None:
+    # A literal invisible or bidi character in source is invisible in review and
+    # can be silently dropped by an editor, so the set must be written as escapes.
+    source = Path(text.__file__).read_bytes()
+
+    assert source.isascii()
+
+
+@pytest.mark.parametrize("code_point", INVISIBLE_CODE_POINTS, ids=lambda cp: f"u{cp:04x}")
+def test_each_invisible_code_point_is_matched_and_escaped(code_point: int) -> None:
+    char = chr(code_point)
+
+    assert text.INVISIBLE_CHARACTERS.fullmatch(char) is not None
+    assert escape_unsafe_characters(f"a{char}b") == "a" + ascii(char)[1:-1] + "b"
+
+
+@pytest.mark.parametrize(
+    "code_point", [0x00AC, 0x00AE, 0x061B, 0x061D, 0x180D, 0x180F, 0x200A, 0x2010, 0x2029, 0x202F, 0x205F, 0x2065, 0x206A, 0xFEFE, 0xFF00]
+)
+def test_neighbours_of_the_invisible_ranges_are_not_matched(code_point: int) -> None:
+    assert text.INVISIBLE_CHARACTERS.search(chr(code_point)) is None

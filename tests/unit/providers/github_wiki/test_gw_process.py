@@ -5,10 +5,17 @@ bound (that would depend on machine load) and never depends on how fast the
 interpreter starts. Children run ``python -S`` (no site import, ~20 ms start),
 the timeout that must expire is ``SHORT`` (50x that), and the only upper bounds
 are hang detectors an order of magnitude above the expected duration.
+
+A test that inspects what a child did before the timeout (a pid, partial
+output) runs it through ``run_until_ready``: the child announces readiness in a
+marker file, and if a loaded machine killed it before that, the run is repeated
+with a longer timeout. The normal case costs one run of ``SHORT``; slowness
+makes the test patient instead of flaky.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 import sys
@@ -19,7 +26,7 @@ from pathlib import Path
 import pytest
 
 from wikiops.providers.github_wiki import process
-from wikiops.providers.github_wiki.ports import CommandResult, GitRunner
+from wikiops.providers.github_wiki.ports import LOCALE_PIN, CommandResult, GitRunner
 from wikiops.providers.github_wiki.process import SubprocessGitRunner
 
 PY = sys.executable
@@ -180,10 +187,23 @@ def test_the_locale_baseline_applies_when_the_ambient_environment_sets_nothing(
     assert run(python(code)).stdout.strip() == "C ''"
 
 
-def test_an_explicit_override_still_wins_over_the_locale_baseline() -> None:
-    code = "import os; print(os.environ.get('LC_ALL'))"
+def test_an_explicit_override_cannot_change_the_pinned_locale() -> None:
+    code = "import os; print(os.environ.get('LC_ALL'), repr(os.environ.get('LANGUAGE')))"
 
-    assert run(python(code), env={"LC_ALL": "C.UTF-8"}).stdout.strip() == "C.UTF-8"
+    result = run(python(code), env={"LC_ALL": "de_DE.UTF-8", "LANGUAGE": "de"})
+
+    assert result.stdout.strip() == "C ''"
+
+
+def test_the_runner_pins_exactly_the_shared_locale_definition() -> None:
+    code = (
+        "import os, json; "
+        "print(json.dumps({k: os.environ.get(k) for k in ('LC_ALL', 'LANGUAGE')}))"
+    )
+
+    observed = json.loads(run(python(code)).stdout)
+
+    assert observed == dict(LOCALE_PIN)
 
 
 def test_the_process_environment_of_the_caller_is_never_modified() -> None:
@@ -223,10 +243,31 @@ def wait_for_file(path: Path, *, limit: float = GENEROUS) -> str:
     raise AssertionError(f"{path.name} was never written")
 
 
-def test_a_command_over_its_timeout_is_killed_and_reported() -> None:
+def run_until_ready(code: str, marker: Path, *, attempts: int = 4) -> CommandResult:
+    """Run ``code`` until it times out AFTER writing ``marker`` (its readiness signal).
+
+    The timeout starts at ``SHORT`` and grows fourfold when the child was killed
+    before it became ready, so a slow start is retried rather than reported.
+    """
+    timeout = SHORT
+    for _ in range(attempts):
+        marker.unlink(missing_ok=True)
+        result = run(python(code), timeout=timeout)
+        if marker.exists() and marker.read_text():
+            return result
+        timeout *= 4
+    raise AssertionError(f"{marker.name} was never written, even with a {timeout / 4:.0f} s timeout")
+
+
+def test_a_command_over_its_timeout_is_killed_and_reported(tmp_path: Path) -> None:
+    ready = tmp_path / "ready"
+    code = (
+        "import time; print('started', flush=True); "
+        f"open({str(ready)!r}, 'w').write('ready'); time.sleep(60)"
+    )
     started = time.monotonic()
 
-    result = run(python("import time; print('started', flush=True); time.sleep(60)"), timeout=SHORT)
+    result = run_until_ready(code, ready)
 
     assert result.timed_out is True
     assert result.returncode != 0
@@ -249,11 +290,12 @@ def test_a_timeout_leaves_no_orphaned_grandchild(tmp_path: Path) -> None:
     )
 
     started = time.monotonic()
-    result = run(python(code), timeout=SHORT)
+    result = run_until_ready(code, pid_file)
+    elapsed = time.monotonic() - started
 
     assert result.timed_out is True
     # A grandchild that kept the pipes open would block the runner until it exited.
-    assert time.monotonic() - started < HANG
+    assert elapsed < HANG
     grandchild = int(wait_for_file(pid_file))
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
@@ -279,14 +321,14 @@ def test_a_daemonized_descendant_holding_the_pipes_cannot_stall_the_runner(
         "import subprocess, sys, time; "
         "d = subprocess.Popen([sys.executable, '-S', '-c', 'import time; time.sleep(30)'], "
         "start_new_session=True); "
-        f"open({str(pid_file)!r}, 'w').write(str(d.pid)); "
         "print('partial output', flush=True); "
+        f"open({str(pid_file)!r}, 'w').write(str(d.pid)); "
         "time.sleep(60)"
     )
 
     started = time.monotonic()
     try:
-        result = run(python(code), timeout=SHORT)
+        result = run_until_ready(code, pid_file)
         elapsed = time.monotonic() - started
     finally:
         with suppress(FileNotFoundError, ProcessLookupError, ValueError):
@@ -299,15 +341,19 @@ def test_a_daemonized_descendant_holding_the_pipes_cannot_stall_the_runner(
 
 
 @posix_only
-def test_the_drain_after_a_timeout_still_collects_output_of_the_killed_tree() -> None:
+def test_the_drain_after_a_timeout_still_collects_output_of_the_killed_tree(
+    tmp_path: Path,
+) -> None:
+    ready = tmp_path / "ready"
     code = (
         "import sys, time; "
         "sys.stdout.write('o' * 200_000); sys.stdout.flush(); "
         "sys.stderr.write('e' * 200_000); sys.stderr.flush(); "
+        f"open({str(ready)!r}, 'w').write('ready'); "
         "time.sleep(60)"
     )
 
-    result = run(python(code), timeout=SHORT)
+    result = run_until_ready(code, ready)
 
     assert result.timed_out is True
     assert (len(result.stdout), len(result.stderr)) == (200_000, 200_000)

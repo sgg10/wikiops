@@ -14,7 +14,8 @@ backend supports every capability the wiki needs.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +67,22 @@ def _invalid(backend_type: str, summary: str, *, hint: str | None = None) -> Git
     )
 
 
+@contextmanager
+def _invalid_options_as_coded_error(backend_type: str) -> Iterator[None]:
+    """Translate a pydantic ``ValidationError`` of the backend's options into one coded error.
+
+    The single place that words an options failure, shared by the offline check
+    and by ``create`` so both report the same problem identically.
+    """
+    try:
+        yield
+    except ValidationError as exc:
+        raise _invalid(
+            backend_type,
+            f"The options of backend '{backend_type}' are invalid: {_validation_summary(exc)}",
+        ) from exc
+
+
 class EntryPointBackendResolver:
     """``BackendResolver`` over the host's registered providers."""
 
@@ -80,12 +97,8 @@ class EntryPointBackendResolver:
             _ROOT_FIELD: _PLACEHOLDER_ROOT,
             "provider_name": _PLACEHOLDER_PROVIDER_NAME,
         }
-        try:
+        with _invalid_options_as_coded_error(backend.type):
             model.model_validate(placeholders)
-        except ValidationError as exc:
-            raise _invalid(
-                backend.type, f"The options of backend '{backend.type}' are invalid: {_validation_summary(exc)}"
-            ) from exc
 
     def create(
         self, backend: LocalBackendSettings, *, root: Path, provider_name: str
@@ -94,11 +107,10 @@ class EntryPointBackendResolver:
         self._settings_model(backend.type)
         settings = {**_options(backend), _ROOT_FIELD: str(root), "provider_name": provider_name}
         try:
-            provider = self._manager.create(backend.type, settings)
-        except ValidationError as exc:
-            raise _invalid(
-                backend.type, f"The options of backend '{backend.type}' are invalid: {_validation_summary(exc)}"
-            ) from exc
+            with _invalid_options_as_coded_error(backend.type):
+                provider = self._manager.create(backend.type, settings)
+        except GithubWikiError:
+            raise
         except Exception as exc:  # noqa: BLE001 - any backend failure is one coded error
             raise _invalid(
                 backend.type, f"Backend '{backend.type}' could not be created: {exc}"

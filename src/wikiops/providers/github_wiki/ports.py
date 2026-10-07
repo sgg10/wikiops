@@ -12,10 +12,17 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Protocol, runtime_checkable
 
 from wikiops.providers.github_wiki.settings import LocalBackendSettings
 from wikiops_sdk.contracts import DocumentProvider
+
+
+# The one definition of the locale every command runs under, so tool output is
+# English and matches the classifier's patterns. Runners and the git facade both
+# apply it AFTER any other override: no transport or caller can change it.
+LOCALE_PIN: Mapping[str, str] = MappingProxyType({"LC_ALL": "C", "LANGUAGE": ""})
 
 
 @dataclass(frozen=True)

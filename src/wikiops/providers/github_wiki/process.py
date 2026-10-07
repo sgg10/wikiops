@@ -9,12 +9,11 @@ import subprocess
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from wikiops.providers.github_wiki.ports import CommandResult
+from wikiops.providers.github_wiki.ports import LOCALE_PIN, CommandResult
 
-# Applied to every command (git, gh): no terminal prompt, and an English
-# locale so error text matches what the classifier and the user-facing hints
-# expect. Per-call overrides still win.
-_BASELINE_ENV = {"GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C", "LANGUAGE": ""}
+# Applied to every command (git, gh): no terminal prompt. A per-call override
+# still wins; the locale (``LOCALE_PIN``) does not, it is applied last.
+_BASELINE_ENV = {"GIT_TERMINAL_PROMPT": "0"}
 # Shell conventions for a command that never ran.
 _COMMAND_NOT_FOUND = 127
 _CANNOT_RUN = 126
@@ -31,6 +30,7 @@ def _environment(env_overrides: Mapping[str, str | None]) -> dict[str, str]:
             environment.pop(name, None)
         else:
             environment[name] = value
+    environment.update(LOCALE_PIN)
     return environment
 
 
@@ -86,8 +86,9 @@ def _start_failure(command: tuple[str, ...], cwd: Path | None, exc: OSError) -> 
 class SubprocessGitRunner:
     """Runs argv lists with ``shell=False`` and a non-interactive environment.
 
-    The environment is the caller's own plus the baseline (no terminal prompt,
-    ``LC_ALL=C``, empty ``LANGUAGE``) and the per-call overrides. stdin is
+    The environment is the caller's own plus the baseline (no terminal prompt),
+    the per-call overrides and, last, the locale pin (``LC_ALL=C``, empty
+    ``LANGUAGE``), which no override can change. stdin is
     closed unless text is supplied, so a command that wants to prompt fails
     instead of hanging. On timeout the whole process group is killed and the
     result carries ``timed_out=True``; the wait for its output is bounded.

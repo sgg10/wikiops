@@ -16,7 +16,16 @@ CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 # embeddings and overrides (U+202A-202E), word joiner and invisible operators
 # (U+2060-2064), isolates (U+2066-2069) and the zero-width no-break space.
 INVISIBLE_CHARACTERS = re.compile(
-    "[­؜᠎​-‏‪-‮⁠-⁤⁦-⁩﻿]"
+    "["
+    "\u00ad"  # soft hyphen
+    "\u061c"  # Arabic letter mark
+    "\u180e"  # Mongolian vowel separator
+    "\u200b-\u200f"  # zero-width space/joiners and left/right marks
+    "\u202a-\u202e"  # embeddings and overrides
+    "\u2060-\u2064"  # word joiner and invisible operators
+    "\u2066-\u2069"  # isolates
+    "\ufeff"  # zero-width no-break space (BOM)
+    "]"
 )
 
 

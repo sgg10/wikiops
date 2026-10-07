@@ -14,18 +14,26 @@ at the workdir's parent, so git can never wander into an enclosing repository.
 ``cwd`` is the only working-directory authority; ``-C`` is never used. Failures
 are classified into coded errors with a redacted stderr tail.
 
-A clone is staged in a hidden sibling directory and renamed onto the workdir
-only after git succeeded: a failure or timeout never leaves a partial workdir
-behind (which a later run would have to classify as a broken clone).
+A clone is staged in a hidden sibling directory (``.<workdir>.clone-<token>``)
+and renamed onto the workdir only after git succeeded: a failure or timeout
+never leaves a partial workdir behind (which a later run would have to classify
+as a broken clone). The running clone holds an advisory lock on its staging
+directory, so a killed process (which cannot clean up) leaves a directory that
+the next clone of the same workdir recognizes as abandoned and removes: only
+names of exactly that shape, only real directories, only when nobody holds the
+lock and the directory is older than a grace period.
 """
 
 from __future__ import annotations
 
 import contextlib
 import os
+import re
 import secrets
 import shutil
+import stat
 import tempfile
+import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
@@ -34,6 +42,7 @@ from wikiops.providers.github_wiki.errors import GithubWikiError
 from wikiops.providers.github_wiki.ports import (
     CommandResult,
     CredentialStrategy,
+    LOCALE_PIN,
     GitRunner,
 )
 from wikiops.providers.github_wiki.redaction import Redactor
@@ -49,16 +58,40 @@ _UNSET_VARIABLES = (
     "GIT_PREFIX",
 )
 _HOOKS_DIRECTORY_PREFIX = "wikiops-nohooks-"
+_STAGING_TOKEN_BYTES = 6
+# An unlocked staging directory younger than this may belong to a clone that has
+# created it but not locked it yet; only older ones are treated as abandoned.
+_STALE_STAGING_SECONDS = 600.0
 
 
-# Applied last on every command: a transport or caller override can never
-# change the locale the classifier's patterns depend on.
-_LOCALE_PIN: dict[str, str | None] = {"LC_ALL": "C", "LANGUAGE": ""}
+def _try_lock_directory(path: Path) -> int | None:
+    """Take an exclusive advisory lock on the directory ``path`` without waiting.
+
+    Returns the open descriptor (closing it drops the lock), or ``None`` when
+    another holder has it, the directory cannot be opened (never followed through
+    a symlink) or the platform or file system cannot lock directories. ``None``
+    therefore never proves a directory is free, only that it was not locked here.
+    """
+    if os.name != "posix":  # pragma: no cover - directory locks are POSIX-only
+        return None
+    import fcntl
+
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags | getattr(os, "O_CLOEXEC", 0))
+    except OSError:
+        return None
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(descriptor)
+        return None
+    return descriptor
 
 
 def _base_environment(workdir: Path) -> dict[str, str | None]:
     environment: dict[str, str | None] = dict.fromkeys(_UNSET_VARIABLES)
-    environment.update(_LOCALE_PIN)
+    environment.update(LOCALE_PIN)
     environment["GIT_CEILING_DIRECTORIES"] = str(workdir.parent)
     return environment
 
@@ -114,7 +147,7 @@ class Git:
         result = self._runner.run(
             argv,
             cwd=self._workdir,
-            env_overrides={**self._base, **(env or {}), **_LOCALE_PIN},
+            env_overrides={**self._base, **(env or {}), **LOCALE_PIN},
             timeout=self._timeout,
             stdin=stdin,
         )
@@ -148,7 +181,8 @@ class Git:
         command runs (``sync.workdir_not_clone``).
         """
         self._require_clone_target()
-        staging = self._workdir.parent / f".{self._workdir.name}.clone-{secrets.token_hex(6)}"
+        self._remove_abandoned_staging()
+        staging = self._workdir.parent / f"{self._staging_prefix()}{secrets.token_hex(_STAGING_TOKEN_BYTES)}"
         try:
             staging.mkdir()
         except OSError as exc:
@@ -157,6 +191,7 @@ class Git:
                 "Cannot create a staging directory next to the workdir for the clone",
                 context={"workdir": str(self._workdir), "reason": exc.strerror or str(exc)},
             ) from exc
+        lock = _try_lock_directory(staging)
         try:
             result = self._network(
                 "clone",
@@ -177,15 +212,60 @@ class Git:
         except BaseException:
             shutil.rmtree(staging, ignore_errors=True)
             raise
+        finally:
+            if lock is not None:
+                os.close(lock)
         return result
 
+    def _staging_prefix(self) -> str:
+        return f".{self._workdir.name}.clone-"
+
+    def _remove_abandoned_staging(self) -> None:
+        """Remove staging directories that crashed clones of this workdir left behind.
+
+        Best effort and conservative: anything that is not provably abandoned
+        (another name, a symlink, a file, a recent directory, a held lock) stays.
+        """
+        pattern = re.compile(re.escape(self._staging_prefix()) + f"[0-9a-f]{{{2 * _STAGING_TOKEN_BYTES}}}")
+        try:
+            siblings = list(self._workdir.parent.iterdir())
+        except OSError:
+            return
+        now = time.time()
+        for entry in siblings:
+            if not pattern.fullmatch(entry.name):
+                continue
+            try:
+                info = entry.lstat()
+            except OSError:
+                continue
+            if not stat.S_ISDIR(info.st_mode) or now - info.st_mtime < _STALE_STAGING_SECONDS:
+                continue
+            lock = _try_lock_directory(entry)
+            if lock is None:
+                continue
+            try:
+                shutil.rmtree(entry, ignore_errors=True)
+            finally:
+                os.close(lock)
+
     def _require_clone_target(self) -> None:
-        """The workdir must be missing or an empty directory; nothing is ever overwritten."""
+        """The workdir must be missing or an empty real directory; nothing is ever overwritten."""
+        if self._workdir.is_symlink():
+            raise self._symlinked_workdir()
         if self._workdir.is_dir() and not any(self._workdir.iterdir()):
             return
-        if not self._workdir.exists() and not self._workdir.is_symlink():
+        if not self._workdir.exists():
             return
         raise self._not_a_clone_target()
+
+    def _symlinked_workdir(self) -> GithubWikiError:
+        return GithubWikiError(
+            "workdir.unusable",
+            "The workdir is a symbolic link; a clone is never published through a link",
+            context={"workdir": str(self._workdir)},
+            hint="set workdir to the real directory path instead of a symbolic link",
+        )
 
     def _not_a_clone_target(self) -> GithubWikiError:
         return GithubWikiError(
@@ -199,6 +279,8 @@ class Git:
         if os.name != "posix":  # pragma: no cover - Windows cannot rename onto an existing directory
             with contextlib.suppress(OSError):
                 self._workdir.rmdir()
+        if self._workdir.is_symlink():
+            raise self._symlinked_workdir()
         try:
             os.replace(staging, self._workdir)
         except OSError as exc:
@@ -239,7 +321,7 @@ class Git:
         environment = {
             **self._base,
             **transport.env_overrides,
-            **_LOCALE_PIN,
+            **LOCALE_PIN,
             "GIT_CONFIG_PARAMETERS": None,
         }
         with tempfile.TemporaryDirectory(prefix=_HOOKS_DIRECTORY_PREFIX) as hooks_directory:

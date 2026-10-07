@@ -9,6 +9,9 @@ environment, literal pathspecs).
 from __future__ import annotations
 
 import os
+import re
+import shutil
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -17,8 +20,9 @@ import pytest
 from tests.support.fake_git_runner import FakeGitRunner, RecordedCall
 from wikiops.providers.github_wiki.auth import EnvTokenStrategy
 from wikiops.providers.github_wiki.errors import GithubWikiError
+from wikiops.providers.github_wiki import git as git_module
 from wikiops.providers.github_wiki.git import Git
-from wikiops.providers.github_wiki.ports import CommandResult, GitTransport
+from wikiops.providers.github_wiki.ports import LOCALE_PIN, CommandResult, GitTransport
 
 TOKEN = "ghp_facade_SECRET_1"
 REMOTE = "https://github.com/acme/platform.wiki.git"
@@ -152,6 +156,15 @@ def test_the_locale_pin_cannot_be_overridden_by_a_transport_or_a_caller(
         ("C", ""),
     ]
     assert runner.calls[1].env_overrides["GIT_AUTHOR_NAME"] == "me"  # other overrides still apply
+
+
+def test_the_facade_pins_exactly_the_shared_locale_definition(
+    git: Git, runner: FakeGitRunner
+) -> None:
+    run_every_command(git)
+
+    for call in runner.calls:
+        assert {name: call.env_overrides[name] for name in LOCALE_PIN} == dict(LOCALE_PIN)
 
 
 def test_a_local_command_needs_a_subcommand(git: Git, runner: FakeGitRunner) -> None:
@@ -462,6 +475,304 @@ def test_each_clone_uses_its_own_staging_directory(strategy: CountingStrategy, t
         git.clone("master")
 
     assert len(set(destinations)) == 2
+
+
+# -- clone staging: deterministic names, stale leftovers cleaned, symlinks refused ------
+
+STALE = 3600.0 * 24  # far older than the grace period before a staging directory counts as abandoned
+
+posix_only = pytest.mark.skipif(os.name != "posix", reason="directory locks are POSIX-only")
+
+
+def staging_directory(parent: Path, workdir_name: str, token: str = "0123456789ab", *, age: float = STALE) -> Path:
+    """A leftover ``.<name>.clone-<token>`` directory with content, ``age`` seconds old."""
+    path = parent / f".{workdir_name}.clone-{token}"
+    (path / ".git").mkdir(parents=True)
+    (path / "Home.md").write_text("half a clone")
+    stamp = time.time() - age
+    os.utime(path, (stamp, stamp))
+    return path
+
+
+def names(directory: Path) -> set[str]:
+    return {path.name for path in directory.iterdir()}
+
+
+def clone_ok(workdir: Path, strategy: CountingStrategy) -> tuple[Git, FakeGitRunner]:
+    return clone_git(clone_into_destination({"Home.md": "# Home"}), strategy, workdir)
+
+
+def test_the_staging_directory_has_a_deterministic_prefix_and_a_random_token(
+    strategy: CountingStrategy, tmp_path: Path
+) -> None:
+    workdir = tmp_path / "cache" / "wiki"
+    workdir.parent.mkdir()
+    git, runner = clone_ok(workdir, strategy)
+
+    git.clone("master")
+
+    assert re.fullmatch(r"\.wiki\.clone-[0-9a-f]{12}", Path(runner.calls[0].argv[-1]).name)
+
+
+def test_a_stale_staging_directory_of_this_workdir_is_removed_by_the_next_clone(
+    strategy: CountingStrategy, tmp_path: Path
+) -> None:
+    workdir = tmp_path / "cache" / "wiki"
+    workdir.parent.mkdir()
+    leftovers = [
+        staging_directory(workdir.parent, "wiki", "0123456789ab"),
+        staging_directory(workdir.parent, "wiki", "ffffffffffff"),
+    ]
+    git, _ = clone_ok(workdir, strategy)
+
+    git.clone("master")
+
+    assert all(not leftover.exists() for leftover in leftovers)
+    assert names(workdir.parent) == {"wiki"}
+    assert (workdir / "Home.md").read_text() == "# Home"
+
+
+def test_cleanup_only_touches_directories_with_this_workdirs_exact_staging_name(
+    strategy: CountingStrategy, tmp_path: Path
+) -> None:
+    parent = tmp_path / "cache"
+    workdir = parent / "wiki"
+    parent.mkdir()
+    bystanders = [
+        staging_directory(parent, "other"),  # another workdir's staging
+        staging_directory(parent, "wiki.clone-x"),  # a longer workdir name sharing our prefix
+        staging_directory(parent, "wiki", "not-a-token"),  # not our token shape
+        staging_directory(parent, "wiki", "0123456789ABCDEF"[:12]),  # upper-case hex is not ours
+        staging_directory(parent, "wiki", "0123456789abc"),  # 13 characters
+        staging_directory(parent, "wiki-backup", "0123456789ab"),
+    ]
+    (parent / "notes.txt").write_text("mine")
+    git, _ = clone_ok(workdir, strategy)
+
+    git.clone("master")
+
+    assert all(path.is_dir() and (path / "Home.md").is_file() for path in bystanders)
+    assert (parent / "notes.txt").read_text() == "mine"
+
+
+def test_cleanup_keeps_a_recent_staging_directory_that_may_still_be_in_use(
+    strategy: CountingStrategy, tmp_path: Path
+) -> None:
+    workdir = tmp_path / "cache" / "wiki"
+    workdir.parent.mkdir()
+    fresh = staging_directory(workdir.parent, "wiki", age=1.0)
+    git, _ = clone_ok(workdir, strategy)
+
+    git.clone("master")
+
+    assert (fresh / "Home.md").is_file()
+
+
+def test_cleanup_never_follows_or_removes_a_symlink_or_file_with_a_staging_name(
+    strategy: CountingStrategy, tmp_path: Path
+) -> None:
+    parent = tmp_path / "cache"
+    workdir = parent / "wiki"
+    parent.mkdir()
+    target = tmp_path / "precious"
+    target.mkdir()
+    (target / "keep.txt").write_text("keep")
+    link = parent / ".wiki.clone-0123456789ab"
+    link.symlink_to(target, target_is_directory=True)
+    plain_file = parent / ".wiki.clone-ffffffffffff"
+    plain_file.write_text("a file, not a directory")
+    git, _ = clone_ok(workdir, strategy)
+
+    git.clone("master")
+
+    assert (target / "keep.txt").read_text() == "keep"
+    assert link.is_symlink()
+    assert plain_file.read_text() == "a file, not a directory"
+
+
+@posix_only
+def test_cleanup_never_removes_a_staging_directory_another_run_holds_locked_until_it_ends(
+    strategy: CountingStrategy, tmp_path: Path
+) -> None:
+    import fcntl
+
+    workdir = tmp_path / "cache" / "wiki"
+    workdir.parent.mkdir()
+    busy = staging_directory(workdir.parent, "wiki")  # old, but a live clone holds it
+    holder = os.open(busy, os.O_RDONLY)
+    fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    git, _ = clone_ok(workdir, strategy)
+    try:
+        git.clone("master")
+        assert (busy / "Home.md").is_file()  # held: not stale, however old
+    finally:
+        os.close(holder)  # the holder ended or was killed: the OS drops its lock
+    shutil.rmtree(workdir)
+
+    git.clone("master")
+
+    assert names(workdir.parent) == {"wiki"}  # now abandoned, so cleaned
+
+
+@posix_only
+def test_the_staging_directory_of_a_running_clone_is_locked_and_released_afterwards(
+    strategy: CountingStrategy, tmp_path: Path
+) -> None:
+    import fcntl
+
+    workdir = tmp_path / "cache" / "wiki"
+    workdir.parent.mkdir()
+    inner = clone_into_destination({"Home.md": "# Home"})
+    observed: list[bool] = []
+
+    def respond(call: RecordedCall) -> CommandResult:
+        probe = os.open(call.argv[-1], os.O_RDONLY)
+        try:
+            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            observed.append(False)  # we could lock it: nobody held it
+        except BlockingIOError:
+            observed.append(True)  # held by the running clone
+        finally:
+            os.close(probe)
+        return inner(call)
+
+    git, _ = clone_git(respond, strategy, workdir)
+
+    git.clone("master")
+
+    assert observed == [True]
+    probe = os.open(workdir, os.O_RDONLY)  # the descriptor was released: no leaked lock
+    try:
+        fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        os.close(probe)
+
+
+@posix_only
+def test_the_directory_lock_helper_reports_free_held_and_unlockable_paths(tmp_path: Path) -> None:
+    free = tmp_path / "free"
+    free.mkdir()
+    a_file = tmp_path / "file"
+    a_file.write_text("x")
+    link = tmp_path / "link"
+    link.symlink_to(free, target_is_directory=True)
+
+    descriptor = git_module._try_lock_directory(free)
+    assert descriptor is not None
+    try:
+        assert git_module._try_lock_directory(free) is None  # held by the first descriptor
+    finally:
+        os.close(descriptor)
+    again = git_module._try_lock_directory(free)
+    assert again is not None  # released with the descriptor
+    os.close(again)
+    assert git_module._try_lock_directory(a_file) is None  # not a directory
+    assert git_module._try_lock_directory(link) is None  # a symlink is never followed
+    assert git_module._try_lock_directory(tmp_path / "missing") is None
+
+
+def test_when_directories_cannot_be_locked_the_clone_works_and_nothing_is_cleaned(
+    strategy: CountingStrategy, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(git_module, "_try_lock_directory", lambda path: None)
+    workdir = tmp_path / "cache" / "wiki"
+    workdir.parent.mkdir()
+    leftover = staging_directory(workdir.parent, "wiki")  # cannot be proven abandoned
+    git, _ = clone_ok(workdir, strategy)
+
+    git.clone("master")
+
+    assert (workdir / "Home.md").read_text() == "# Home"
+    assert (leftover / "Home.md").is_file()
+
+
+def test_a_staging_directory_that_vanishes_during_cleanup_is_skipped(
+    strategy: CountingStrategy, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workdir = tmp_path / "cache" / "wiki"
+    workdir.parent.mkdir()
+    staging_directory(workdir.parent, "wiki")
+    real_lstat = Path.lstat
+
+    def vanishing(self: Path, *args: object, **kwargs: object):
+        if self.name.startswith(".wiki.clone-"):
+            raise FileNotFoundError(self.name)
+        return real_lstat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", vanishing)
+    git, _ = clone_ok(workdir, strategy)
+
+    git.clone("master")
+
+    assert (workdir / "Home.md").read_text() == "# Home"
+
+
+def test_a_refused_clone_target_cleans_nothing(strategy: CountingStrategy, tmp_path: Path) -> None:
+    workdir = tmp_path / "cache" / "wiki"
+    workdir.mkdir(parents=True)
+    (workdir / "mine.txt").write_text("keep")
+    leftover = staging_directory(workdir.parent, "wiki")
+    git, runner = clone_ok(workdir, strategy)
+
+    with pytest.raises(GithubWikiError) as caught:
+        git.clone("master")
+
+    assert caught.value.code == "sync.workdir_not_clone"
+    assert (leftover / "Home.md").is_file()
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize("target", ["empty-directory", "non-empty-directory", "dangling"])
+def test_a_workdir_that_is_a_symlink_is_unusable_before_any_clone(
+    strategy: CountingStrategy, tmp_path: Path, target: str
+) -> None:
+    parent = tmp_path / "cache"
+    parent.mkdir()
+    real = tmp_path / "real"
+    if target != "dangling":
+        real.mkdir()
+    if target == "non-empty-directory":
+        (real / "mine.txt").write_text("keep")
+    workdir = parent / "wiki"
+    workdir.symlink_to(real, target_is_directory=True)
+    git, runner = clone_ok(workdir, strategy)
+
+    with pytest.raises(GithubWikiError) as caught:
+        git.clone("master")
+
+    assert caught.value.code == "workdir.unusable"
+    assert "symbolic link" in str(caught.value)
+    assert runner.calls == []
+    assert strategy.issued == 0
+    assert workdir.is_symlink()
+    assert names(parent) == {"wiki"}
+    if target != "dangling":
+        assert names(real) == ({"mine.txt"} if target == "non-empty-directory" else set())
+
+
+def test_a_workdir_swapped_for_a_symlink_during_the_clone_is_unusable_and_staging_removed(
+    strategy: CountingStrategy, tmp_path: Path
+) -> None:
+    parent = tmp_path / "cache"
+    parent.mkdir()
+    workdir = parent / "wiki"
+    real = tmp_path / "real"
+    real.mkdir()
+    inner = clone_into_destination({"Home.md": "# remote"})
+
+    def respond(call: RecordedCall) -> CommandResult:
+        result = inner(call)
+        workdir.symlink_to(real, target_is_directory=True)  # swapped after the pre-clone check
+        return result
+
+    git, _ = clone_git(respond, strategy, workdir)
+
+    with pytest.raises(GithubWikiError) as caught:
+        git.clone("master")
+
+    assert caught.value.code == "workdir.unusable"
+    assert list(real.iterdir()) == []  # nothing was published through the link
+    assert names(parent) == {"wiki"}
 
 
 # -- the empty hooks directory ------------------------------------------------------------

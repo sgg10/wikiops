@@ -370,3 +370,25 @@ def test_create_redacts_secrets_in_a_backend_failure(
     assert error.code == "config.backend_invalid"
     assert "p@ss" not in rendered and "user:" not in rendered
     assert "***@host.example" in rendered
+
+
+@pytest.mark.parametrize(
+    "options",
+    [{"bogus_option": 1}, {"overwrite_existing": "maybe"}, {"assets_dir": 7}],
+    ids=["unknown-option", "bad-bool", "bad-type"],
+)
+def test_the_offline_check_and_create_report_invalid_options_identically(
+    resolver: EntryPointBackendResolver, workdir: Path, options: dict
+) -> None:
+    offline = failure(lambda: resolver.check_offline(selection("local_files", **options)))
+    created = failure(
+        lambda: resolver.create(
+            selection("local_files", **options), root=workdir, provider_name="w"
+        )
+    )
+
+    assert (offline.code, offline.summary, offline.context) == (
+        created.code,
+        created.summary,
+        created.context,
+    )

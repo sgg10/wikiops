@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import inspect
 import re
 
 import pytest
 
-from wikiops.providers.github_wiki import classifier
 from wikiops.providers.github_wiki.classifier import (
     PushRefResult,
     classify,
@@ -534,16 +532,34 @@ def test_push_output_is_redacted_like_everything_else() -> None:
     assert token not in str(error)
 
 
-# -- the ssh publickey marker has one source ---------------------------------
+# -- the ssh publickey marker classifies and selects the hint the same way -------------
+
+PUBLICKEY_DENIALS = [
+    "git@github.com: Permission denied (publickey).\n",
+    "PERMISSION DENIED (PUBLICKEY,keyboard-interactive).\nfatal: Could not read from remote repository.\n",
+    "noise before\nroot@host: permission denied (publickey)\nnoise after\n",
+]
 
 
-def test_the_ssh_publickey_marker_is_defined_once_and_shared_by_both_uses() -> None:
-    source = inspect.getsource(classifier).lower()
-    assert source.count("permission denied") == 1  # one regex, not a copy per use
+@pytest.mark.parametrize("operation", ["ls-remote", "clone", "fetch", "push"])
+@pytest.mark.parametrize("stderr", PUBLICKEY_DENIALS, ids=["plain", "uppercase-mixed", "noisy"])
+def test_a_publickey_denial_is_auth_rejected_with_the_ssh_hint_for_every_operation(
+    operation: str, stderr: str
+) -> None:
+    result = CommandResult(("git", operation), 128, "", stderr, False)
 
-    ssh_denied = CommandResult(
-        ("git", "fetch"), 128, "", "git@github.com: Permission denied (publickey).\n", False
-    )
-    error = classify("fetch", ssh_denied, redactor=PLAIN)
+    error = classify(operation, result, redactor=PLAIN)
+
     assert error.code == "auth.rejected"
-    assert "auth.key_path" in error.hint  # the ssh-specific hint reads the same marker
+    assert "auth.key_path" in error.hint
+
+
+@pytest.mark.parametrize("operation", ["ls-remote", "fetch", "push"])
+def test_an_https_rejection_is_auth_rejected_without_the_ssh_hint(operation: str) -> None:
+    stderr = "fatal: unable to access 'https://github.com/a/b.wiki.git/': The requested URL returned error: 403\n"
+    result = CommandResult(("git", operation), 128, "", stderr, False)
+
+    error = classify(operation, result, redactor=PLAIN)
+
+    assert error.code == "auth.rejected"
+    assert "auth.key_path" not in error.hint
