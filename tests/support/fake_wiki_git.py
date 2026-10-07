@@ -271,6 +271,15 @@ class FakeWikiGit:
         self.staged |= set(args[1:])
         return 0, "", ""
 
+    def _cmd_checkout(self, args, call):
+        """``checkout HEAD -- paths``: tracked files get their committed bytes back."""
+        assert args[:2] == ["HEAD", "--"] and len(args) > 2, f"checkout must name HEAD and explicit paths: {args}"
+        for path in args[2:]:
+            if path not in self.committed_files:
+                return 1, "", f"error: pathspec '{path}' did not match any file(s) known to git\n"
+            (self.workdir / path).write_bytes(self.committed_files[path])
+        return 0, "", ""
+
     def _cmd_diff(self, args, call):
         assert args[:3] == ["--cached", "--quiet", "--"] and len(args) > 3, args
         changed = {self._dirty_path(entry) for entry in self.dirty_entries()}

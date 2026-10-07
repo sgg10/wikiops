@@ -44,7 +44,7 @@ from wikiops_sdk.domain import (
     PutAssetOperation,
 )
 
-from wikiops.providers.github_wiki import layout, writes
+from wikiops.providers.github_wiki import layout, rollback, writes
 from wikiops.providers.github_wiki.errors import GithubWikiError, render_message
 from wikiops.providers.github_wiki.git import Git
 from wikiops.providers.github_wiki.lock import WorkdirLock
@@ -230,9 +230,15 @@ class GithubWikiProvider:
         sync = self._wiki_sync()
         with sync.lock.hold("apply"):
             sync.recheck()
+            pending = set(sync.manifest.entries())
             asset = backend.put_asset(operation, content)
-            layout.build_asset_reference(asset.ref)
-            sync.manifest.record([asset.ref.locator["path"]])
+            try:
+                layout.build_asset_reference(asset.ref)
+                sync.manifest.record([asset.ref.locator["path"]])
+            except Exception:
+                # The backend already wrote the file: do not leave our own orphan behind.
+                rollback.roll_back(self._git_facade(), before=pending, keep=())
+                raise
         return asset
 
     def apply_changes(self, changeset: ChangeSet) -> ApplyResult:
@@ -265,17 +271,36 @@ class GithubWikiProvider:
             prepared = writes.prepare(operations, provider_name=self.settings.provider_name)
             if not prepared.delegated:
                 return writes.in_order(operations, prepared.failures)
+            pending = set(sync.manifest.entries())
             reply = backend.apply_changes(
                 changeset.model_copy(update={"operations": list(prepared.delegated)})
             )
-            settled = writes.settle(prepared.delegated, reply)
-            # Before anything else can fail: whatever the backend reported is wikiops' own
-            # pending work, never a foreign change at the next run.
-            sync.manifest.record(settled.written)
+            settled = self._accepted(sync, prepared.delegated, reply, pending)
             results = writes.in_order(operations, prepared.failures, settled.results)
             if all(item.status is OperationStatus.FAILED for item in results):
                 return results  # a failed apply leaves the history as it was
             return self._publish(sync, changeset.plugin_id, settled, results)
+
+    def _accepted(
+        self, sync: WikiSync, delegated: tuple[Any, ...], reply: ApplyResult, pending: set[str]
+    ) -> writes.Settled:
+        """Validate what the backend reported and make the clone match it.
+
+        What the provider refuses is rolled back (it is not wikiops' pending work and would
+        block the next run); what it accepts is recorded before anything else can fail, so
+        it is never a foreign change at the next run.
+        """
+        git = self._git_facade()
+        try:
+            settled = writes.settle(delegated, reply)
+            if settled.rejected:
+                leftovers = rollback.roll_back(git, before=pending, keep=settled.written)
+                settled = writes.note_leftovers(settled, leftovers)
+            sync.manifest.record(settled.written)
+        except Exception:
+            rollback.roll_back(git, before=pending, keep=())
+            raise
+        return settled
 
     def _publish(
         self,

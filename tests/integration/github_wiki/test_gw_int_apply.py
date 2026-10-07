@@ -246,3 +246,33 @@ def test_the_manifest_records_what_was_written_with_its_hash(wiki: Wiki) -> None
     assert document["version"] == 1
     assert list(document["paths"]) == ["First.md"]
     assert document["paths"]["First.md"].startswith("sha256:")
+
+
+# -- a rejected backend write leaves nothing behind (S12.F1) ----------------------------------------
+
+
+def test_a_rejected_backend_write_is_rolled_back_and_the_next_apply_goes_through(wiki: Wiki) -> None:
+    resolver = ScriptedResolver()
+    wiki.resolver = resolver
+    provider = wiki.provider()
+    provider.exists(ref(SEED_PAGE))  # clone and create the scripted backend
+    assert resolver.backend is not None
+
+    def report_a_nested_ref(changeset, real):  # noqa: ANN001, ANN202
+        reported = [item.model_copy(update={"resolved_ref": ref("../evil.md")}) for item in real.results]
+        return type(real)(provider_name=real.provider_name, results=reported)
+
+    resolver.backend.on_apply = report_a_nested_ref
+
+    rejected = provider.apply_changes(change_set(create("Orphan.md", "# orphan\n"), update(SEED_PAGE, "# edited\n")))
+
+    assert statuses(rejected) == [OperationStatus.FAILED] * 2
+    assert wiki.status() == []  # the new file is gone, the seed page is back to HEAD
+    assert (wiki.workdir / SEED_PAGE).read_text() == SEED_CONTENT
+    assert wiki.commit_count() == 1
+
+    resolver.backend.on_apply = None
+    again = wiki.provider().apply_changes(change_set(create("Next.md", "# next\n")))
+
+    assert statuses(again) == [OperationStatus.APPLIED]
+    assert wiki.last_commit_files() == ["Next.md"]

@@ -52,6 +52,7 @@ class Settled:
     results: dict[str, AppliedOperationResult]
     pages: tuple[str, ...]
     assets: tuple[str, ...]
+    rejected: tuple[str, ...] = ()  # ids of operations the backend applied and the provider refused
 
     @property
     def written(self) -> tuple[str, ...]:
@@ -153,6 +154,7 @@ def settle(delegated: Sequence[Any], reply: ApplyResult) -> Settled:
     results: dict[str, AppliedOperationResult] = {}
     pages: list[str] = []
     assets: list[str] = []
+    rejected: list[str] = []
     for operation in delegated:
         result = by_id.get(operation.operation_id)
         if result is None:
@@ -166,11 +168,25 @@ def settle(delegated: Sequence[Any], reply: ApplyResult) -> Settled:
             results[operation.operation_id] = result.model_copy(
                 update={"status": OperationStatus.FAILED, "message": str(error)}
             )
+            rejected.append(operation.operation_id)
             continue
         results[operation.operation_id] = result
         pages += written_pages
         assets += written_assets
-    return Settled(results, tuple(pages), tuple(assets))
+    return Settled(results, tuple(pages), tuple(assets), tuple(rejected))
+
+
+def note_leftovers(settled: Settled, leftovers: Sequence[str]) -> Settled:
+    """Tell, on every rejected operation, which files the rollback could not undo."""
+    if not leftovers:
+        return settled
+    named = ", ".join(f"'{path}'" for path in leftovers)
+    note = f"the clone still holds {named}: restore or delete it by hand before the next apply"
+    results = dict(settled.results)
+    for operation_id in settled.rejected:
+        item = results[operation_id]
+        results[operation_id] = item.model_copy(update={"message": with_note(item.message, note)})
+    return Settled(results, settled.pages, settled.assets, settled.rejected)
 
 
 def in_order(
