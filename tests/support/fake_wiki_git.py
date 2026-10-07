@@ -54,6 +54,9 @@ class FakeWikiGit:
     local: list[str] = field(default_factory=lambda: ["c1"])
     tracking: list[str] = field(default_factory=lambda: ["c1"])
     origin_head: str | None = "master"  # refs/remotes/origin/HEAD target
+    # remote-tracking branches present locally; None = every remote branch plus the
+    # checked-out branch and the origin/HEAD target (the lenient default)
+    tracking_refs: set[str] | None = None
     dirty: list[str] = field(default_factory=list)  # raw porcelain entries ("?? Home.md")
     top_level: Path | None = None  # what `rev-parse --show-toplevel` prints (default: workdir)
     git_dir_path: Path | None = None  # what `rev-parse --absolute-git-dir` prints (default: workdir/.git)
@@ -139,10 +142,27 @@ class FakeWikiGit:
             return (128, "", "fatal: not a git repository (or any parent up to mount point)\n")
         return None
 
+    def tracking_branches(self) -> set[str]:
+        if self.tracking_refs is not None:
+            return set(self.tracking_refs)
+        return {name for name in [*self.remote, self.origin_head, self.local_branch] if name}
+
+    def _cmd_for_each_ref(self, args, call):
+        error = self._repo_or_error()
+        if error:
+            return error
+        assert args == ["--format=%(refname:lstrip=3)", "refs/remotes/origin"], args
+        return 0, "".join(f"{name}\n" for name in sorted(self.tracking_branches())), ""
+
     def _cmd_rev_parse(self, args, call):
         error = self._repo_or_error()
         if error:
             return error
+        if args[:2] == ["--verify", "--quiet"] and len(args) == 3:
+            branch = args[2].removeprefix("refs/remotes/origin/")
+            if args[2].startswith("refs/remotes/origin/") and branch in self.tracking_branches():
+                return 0, f"{sha_for(branch)}\n", ""
+            return 1, "", ""
         if args == ["--show-toplevel"]:
             return 0, f"{self.top_level or self.workdir}\n", ""
         if args == ["--absolute-git-dir"]:

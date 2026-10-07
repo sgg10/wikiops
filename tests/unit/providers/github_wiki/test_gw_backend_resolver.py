@@ -102,6 +102,29 @@ class ExplodingFactory:
         return ExplodingBackend(settings)
 
 
+class CodedFailureBackend(FakeFileBackend):
+    """A backend whose own validation raises a github_wiki-coded error (not ours to re-raise)."""
+
+    def validate_settings(self) -> None:
+        raise GithubWikiError("sync.git_failed", "the backend ran git and it failed")
+
+
+class CodedValidateFactory:
+    provider_id = "coded_validate"
+    settings_model = FakeFileBackendSettings
+
+    def create(self, settings: FakeFileBackendSettings) -> CodedFailureBackend:
+        return CodedFailureBackend(settings)
+
+
+class CodedCreateFactory:
+    provider_id = "coded_create"
+    settings_model = FakeFileBackendSettings
+
+    def create(self, settings: FakeFileBackendSettings) -> FakeFileBackend:
+        raise GithubWikiError("auth.rejected", "the backend factory failed to authenticate")
+
+
 class SpyFactory(FakeFileBackendFactory):
     provider_id = "spy"
 
@@ -124,6 +147,8 @@ def resolver() -> EntryPointBackendResolver:
             limited("no_assets", C.PUT_ASSET),
             limited("no_read_no_assets", C.PUT_ASSET, C.READ_DOCUMENT, C.RESOLVE_BY_PATH),
             ExplodingFactory(),
+            CodedValidateFactory(),
+            CodedCreateFactory(),
         )
     )
 
@@ -370,6 +395,39 @@ def test_create_redacts_secrets_in_a_backend_failure(
     assert error.code == "config.backend_invalid"
     assert "p@ss" not in rendered and "user:" not in rendered
     assert "***@host.example" in rendered
+
+
+@pytest.mark.parametrize(
+    ("backend_type", "original_code"),
+    [("coded_validate", "sync.git_failed"), ("coded_create", "auth.rejected")],
+)
+def test_a_github_wiki_error_raised_by_the_backend_is_wrapped_not_propagated(
+    resolver: EntryPointBackendResolver, workdir: Path, backend_type: str, original_code: str
+) -> None:
+    error = failure(
+        lambda: resolver.create(selection(backend_type), root=workdir, provider_name="w")
+    )
+
+    assert error.code == "config.backend_invalid"  # not the backend's own code
+    assert error.context["type"] == backend_type
+    assert "could not be created" in error.summary
+    assert f"[github_wiki:{original_code}]" in error.summary  # its message is carried, redacted
+
+
+def test_the_resolvers_own_coded_errors_are_still_raised_unchanged(
+    resolver: EntryPointBackendResolver, workdir: Path
+) -> None:
+    unknown = failure(lambda: resolver.create(selection("nope"), root=workdir, provider_name="w"))
+    options = failure(
+        lambda: resolver.create(selection(bogus_option=1), root=workdir, provider_name="w")
+    )
+    incompatible = failure(
+        lambda: resolver.create(selection("no_assets"), root=workdir, provider_name="w")
+    )
+
+    assert unknown.code == "config.backend_unknown"
+    assert options.code == "config.backend_invalid" and "could not be created" not in options.summary
+    assert incompatible.code == "config.backend_incompatible"
 
 
 @pytest.mark.parametrize(

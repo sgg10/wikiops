@@ -24,7 +24,9 @@ foreign changes and fast-forwarded to the remote. It follows these rules:
   ahead of the remote are kept.
 * An offline plan (``sync_on_plan: false``) reads the existing clone without a
   single network command, and fails with ``sync.no_local_clone`` when there is
-  none. Apply always syncs.
+  none, or with ``sync.branch_not_found`` when the branch it would read (override,
+  ``origin/HEAD`` or the checked-out fallback) has no remote-tracking ref in the
+  clone. Apply always syncs.
 """
 
 from __future__ import annotations
@@ -191,6 +193,7 @@ class WikiSync:
         branch = self._branch_override or self._origin_head() or self._current_branch()
         if branch is None:
             return None
+        self._require_tracking_ref(branch)
         return self._snapshot(branch, offline=True)
 
     # -- the two paths -----------------------------------------------------------
@@ -209,6 +212,7 @@ class WikiSync:
             branch = self._require_checked_out(
                 self._branch_override or self._origin_head() or self._current_branch()
             )
+            self._require_tracking_ref(branch)
             self._require_no_foreign_changes()
             return self._snapshot(branch, offline=True)
 
@@ -342,6 +346,25 @@ class WikiSync:
                 },
             )
         return expected
+
+    def _require_tracking_ref(self, branch: str) -> None:
+        """Refuse a branch the clone never fetched (no ``refs/remotes/origin/<branch>``).
+
+        Only the offline paths need it: they read the clone without fetching, so a
+        branch chosen from the override or the checked-out fallback may name nothing
+        the clone knows about, and every number computed against it would be fiction.
+        """
+        reference = f"{_ORIGIN_HEAD_PREFIX}{branch}"
+        if self._probe("rev-parse", "--verify", "--quiet", reference).returncode == 0:
+            return
+        listing = self._probe("for-each-ref", "--format=%(refname:lstrip=3)", "refs/remotes/origin")
+        known = sorted(name for name in listing.stdout.split() if name != "HEAD")
+        raise GithubWikiError(
+            "sync.branch_not_found",
+            f"Branch '{branch}' has no remote-tracking ref in the local clone, so an offline plan cannot read it",
+            context={"workdir": str(self._git.workdir), "available": ", ".join(known) or "(none)"},
+            hint="run once with sync_on_plan: true (or apply) so the clone fetches the branch, or set 'branch' to one the clone has fetched",
+        )
 
     # -- dirty policy, fetch, fast-forward -----------------------------------------------
 
