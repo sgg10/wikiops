@@ -1,0 +1,58 @@
+providers:
+  wiki:
+    type: github_wiki
+    # Repository that owns the wiki, as "owner/repo" (no ".wiki" suffix, no URL).
+    repository: acme/platform
+    # GitHub Enterprise Server only; defaults to github.com.
+    # host: github.example.com
+    # Branch of the wiki repository. Omit it to use the remote default
+    # (wikis created in the web UI use "master").
+    # branch: master
+    # Local clone of the wiki. Omit it for a per-profile directory in the user cache
+    # (the plan's provider_target note shows the resolved path). A relative value
+    # resolves against the working directory of the process (not this file).
+    # workdir: ~/wikiops/platform-wiki
+    # Fetch and fast-forward the clone on plan. false = plans read the existing
+    # clone without network access (apply always syncs).
+    sync_on_plan: true
+    # How git gets credentials: env | gh | ssh | ambient (default: ambient).
+    auth:
+      mode: env
+      variable: GITHUB_TOKEN        # name of the variable; the value never goes in this file
+      # mode: gh
+      # account: octocat
+      # mode: ssh
+      # key_path: ~/.ssh/id_ed25519   # optional
+      # mode: ambient                  # git's own credential helper / SSH config
+    commit:
+      identity:
+        mode: git                    # git | bot | custom
+        # mode: bot                  # wikiops <wikiops@users.noreply.github.com>
+        # mode: custom
+        # name: Docs Bot
+        # email: docs-bot@example.com
+      # Placeholders: {plugin_id}, {provider_name}, {page_count}
+      message: "docs(wiki): update via wikiops plugin {plugin_id}"
+    # Commit what an apply wrote (default true).
+    allow_auto_commit: true
+    # Push after committing (default false: commits stay local until you push).
+    # Requires allow_auto_commit: true.
+    allow_auto_push: false
+    # Backend that writes the files into the clone; extra keys are its own options.
+    local_backend:
+      type: local_files
+      assets_dir: assets
+    git_timeout_seconds: 120
+
+profiles:
+  default:
+    provider: wiki
+    refs:
+      home:
+        provider: wiki
+        kind: path
+        locator:
+          # Flat root page: no "/" in the name, must end in ".md".
+          path: Home.md
+    # Add plugin-specific config only when the workflow actually needs it.
+    # Prefer plugin defaults unless you intentionally want to override them.

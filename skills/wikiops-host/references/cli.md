@@ -49,7 +49,7 @@ Example:
 wikiops providers
 ```
 
-Use this command to confirm which provider types are available. The built-in ones are `azure_devops_wiki` and `local_files`.
+Use this command to confirm which provider types are available. The built-in ones are `azure_devops_wiki`, `local_files` and `github_wiki`.
 
 ## `wikiops docs get`
 
@@ -121,7 +121,7 @@ Expected sections:
 - `=== CHANGESET ===`
 - `=== DIFF ===`
 
-When the provider can describe its target (for example `local_files`), the first entry of `ChangeSet.notes` has code `provider_target` and reads `Provider '<name>' (<provider id>) target: <description>`. Read it before applying. If the provider fails to describe its target, the plan continues without the note and `ChangeSet.warnings` gets a `provider_target_unavailable` warning.
+When the provider can describe its target (for example `local_files` or `github_wiki`), the first entry of `ChangeSet.notes` has code `provider_target` and reads `Provider '<name>' (<provider id>) target: <description>`. Read it before applying. If the provider fails to describe its target, the plan continues without the note and `ChangeSet.warnings` gets a `provider_target_unavailable` warning.
 
 ### Apply mode
 

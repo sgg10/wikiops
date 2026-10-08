@@ -63,6 +63,7 @@ It also does not contain built-in documentation plugins. Plugin business logic i
 - [`reference/core-modules.md`](reference/core-modules.md): module-level map of the runtime
 - [`reference/azure-devops-wiki.md`](reference/azure-devops-wiki.md): built-in Azure DevOps Wiki provider reference
 - [`reference/local-files.md`](reference/local-files.md): built-in local Markdown files provider reference
+- [`reference/github-wiki.md`](reference/github-wiki.md): built-in GitHub wiki provider reference
 - [`reference/internal-boundaries.md`](reference/internal-boundaries.md): public behavior versus internal implementation details
 
 ## Reading Paths

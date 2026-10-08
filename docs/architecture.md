@@ -115,6 +115,10 @@ src/wikiops/
     local_files/
       _layout.py
       provider.py
+    github_wiki/
+      factory.py
+      provider.py
+      ...
 ```
 
 `providers/_fs.py` holds the provider-agnostic filesystem safety helpers used by `local_files`; it is internal and not an extension API.
@@ -165,7 +169,7 @@ This keeps the execution flow easy to reason about and easy to test.
 
 The current host is intentionally focused:
 
-- it ships two built-in providers, Azure DevOps Wiki and local Markdown files
+- it ships three built-in providers: Azure DevOps Wiki, local Markdown files, and GitHub wikis (through a local git clone that composes the local files provider as its file backend)
 - it does not ship built-in plugins
 - configuration is YAML-based
 - preview diffs are strongest for update operations

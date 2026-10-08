@@ -64,12 +64,13 @@ pat_token_env: AZDO_PAT
 
 ### Built-In Provider Types
 
-The host currently ships two provider implementations. Run `wikiops providers` to confirm which types are discoverable in the current environment.
+The host currently ships three provider implementations. Run `wikiops providers` to confirm which types are discoverable in the current environment.
 
 | `type` | Stores documents in | Reference |
 | --- | --- | --- |
 | `azure_devops_wiki` | an Azure DevOps Wiki | [`reference/azure-devops-wiki.md`](reference/azure-devops-wiki.md) |
 | `local_files` | Markdown files below a local root directory | [`reference/local-files.md`](reference/local-files.md) |
+| `github_wiki` | the wiki of a GitHub repository, through a local git clone | [`reference/github-wiki.md`](reference/github-wiki.md) |
 
 ### Local Files Example
 
@@ -99,6 +100,48 @@ profiles:
 - `overwrite_existing` (optional, default `false`): allow create operations to replace an existing file with different content
 
 Unknown keys are rejected. Ref paths for this provider are relative to `root`, use `/` separators, have no leading `/`, and end in `.md`; this differs from Azure DevOps paths such as `/Engineering/Teams`. The host prints a `provider_target` note on every plan showing the resolved root and working directory; check it before applying. See [`reference/local-files.md`](reference/local-files.md) for the full behavior.
+
+### GitHub Wiki Example
+
+```yaml
+providers:
+  wiki:
+    type: github_wiki
+    repository: acme/platform
+    auth:
+      mode: env
+      variable: GITHUB_TOKEN
+    commit:
+      identity:
+        mode: bot
+    allow_auto_commit: true
+    allow_auto_push: false
+
+profiles:
+  default:
+    provider: wiki
+    refs:
+      home:
+        provider: wiki
+        kind: path
+        locator:
+          path: Home.md
+```
+
+`github_wiki` settings:
+
+- `repository` (required): `owner/repo` of the repository that owns the wiki
+- `host` (optional, default `github.com`): bare hostname, for GitHub Enterprise Server
+- `branch` (optional): defaults to the remote's default branch
+- `workdir` (optional): local clone directory; a relative value resolves against the working directory of the process, and the default is a per-profile directory in the user cache
+- `sync_on_plan` (optional, default `true`): fetch on plan; `false` reads the existing clone offline
+- `auth` (optional, default `ambient`): `mode` is `env` (`variable`), `gh` (`account`), `ssh` (optional `key_path`), or `ambient`; a token is never written in the config
+- `commit` (optional): `identity` (`git`, `bot` or `custom`) and `message` template with `{plugin_id}`, `{provider_name}`, `{page_count}`
+- `allow_auto_commit` (optional, default `true`) and `allow_auto_push` (optional, default `false`; requires auto commit)
+- `local_backend` (optional, default `{type: local_files}`): backend that writes the files into the clone
+- `git_timeout_seconds` (optional, default `120`)
+
+Unknown keys are rejected. Ref paths are flat root pages that end in `.md` (`Home.md`); a path with `/` fails with `path.nested_not_supported`. The host prints a `provider_target` note on every plan showing the remote and the clone directory; check it before applying. See [`reference/github-wiki.md`](reference/github-wiki.md) for the full behavior, including error codes.
 
 ## Profiles
 

@@ -179,6 +179,9 @@ def test_capabilities_do_not_depend_on_the_backend_and_hand_out_a_fresh_set(tmp_
         (page(".git/config"), "path.reserved"),
         (page("notes.txt"), "path.not_markdown"),
         (page(None), "ref.missing_path"),
+        (page(".md"), "path.invalid_name"),
+        (page(" Home.md"), "path.invalid_name"),
+        (page("Ho\x00me.md"), "path.invalid_name"),
         (page("Home.md", kind=RefKind.ID), "ref.unsupported_kind"),
     ],
 )

@@ -84,6 +84,7 @@ class FakeWikiGit:
     dirty: list[str] = field(default_factory=list)  # raw porcelain entries ("?? Home.md")
     track_files: bool = False  # derive dirty entries from the files below the workdir as well
     committed_files: dict[str, bytes] = field(default_factory=dict)  # path -> committed bytes
+    ignored: set[str] = field(default_factory=set)  # untracked paths a .gitignore / info/exclude hides
     top_level: Path | None = None  # what `rev-parse --show-toplevel` prints (default: workdir)
     git_dir_path: Path | None = None  # what `rev-parse --absolute-git-dir` prints (default: workdir/.git)
     head_valid: bool = True  # False: a partial clone with no commit
@@ -243,7 +244,8 @@ class FakeWikiGit:
             if path in known:
                 continue
             if path not in self.committed_files:
-                entries.append(f"?? {path}")
+                if path not in self.ignored:  # git status never lists an ignored file
+                    entries.append(f"?? {path}")
             elif self.committed_files[path] != data:
                 entries.append(f" M {path}")
         entries += [
@@ -269,6 +271,24 @@ class FakeWikiGit:
     def _cmd_add(self, args, call):
         assert args and args[0] == "--" and len(args) > 1, f"add must name explicit paths: {args}"
         self.staged |= set(args[1:])
+        return 0, "", ""
+
+    def _cmd_check_ignore(self, args, call):
+        """``check-ignore --stdin -z``: the ignored untracked paths, NUL-terminated; 1 when none."""
+        assert args == ["--stdin", "-z"] and call.stdin, f"check-ignore reads NUL-separated names: {args}"
+        named = [path for path in call.stdin.split("\0") if path]
+        hits = [path for path in named if path in self.ignored and path not in self.committed_files]
+        if not hits:
+            return 1, "", ""
+        return 0, "".join(f"{path}\0" for path in hits), ""
+
+    def _cmd_checkout(self, args, call):
+        """``checkout HEAD -- paths``: tracked files get their committed bytes back."""
+        assert args[:2] == ["HEAD", "--"] and len(args) > 2, f"checkout must name HEAD and explicit paths: {args}"
+        for path in args[2:]:
+            if path not in self.committed_files:
+                return 1, "", f"error: pathspec '{path}' did not match any file(s) known to git\n"
+            (self.workdir / path).write_bytes(self.committed_files[path])
         return 0, "", ""
 
     def _cmd_diff(self, args, call):

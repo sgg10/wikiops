@@ -193,7 +193,7 @@ def test_page_link_never_points_at_the_wiki_root_for_an_empty_stem(path: str) ->
     with pytest.raises(GithubWikiError) as caught:
         build_link(page_ref(path), host="github.com", repository="acme/platform")
 
-    assert caught.value.code == "ref.missing_path"
+    assert caught.value.code == "path.invalid_name"
 
 
 @pytest.mark.parametrize("path", ["a\x00b.md", " a.md", "a .md", "a\nb.md"])
@@ -201,7 +201,7 @@ def test_page_link_is_never_built_for_an_unsafe_name(path: str) -> None:
     with pytest.raises(GithubWikiError) as caught:
         build_link(page_ref(path), host="github.com", repository="acme/platform")
 
-    assert caught.value.code == "path.reserved"
+    assert caught.value.code == "path.invalid_name"
 
 
 @pytest.mark.parametrize(

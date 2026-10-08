@@ -39,6 +39,7 @@ from tests.support.write_ops import (
     update,
 )
 from wikiops.providers._fs import content_version
+from wikiops.providers.github_wiki.errors import GithubWikiError
 from wikiops.providers.github_wiki.lock import WorkdirLock
 from wikiops.providers.github_wiki.manifest import PendingManifest
 from wikiops.providers.github_wiki.workdir import lock_path, manifest_path
@@ -418,10 +419,26 @@ ALIAS_REF = DocumentRef(provider="", kind=RefKind.ALIAS, alias="home")
         (update("README", "x"), "path.not_markdown"),
         (CreateDocumentOperation(ref=ALIAS_REF, title="T", content="x"), "ref.unsupported_kind"),
         (create("  ", title="T"), "ref.missing_path"),
+        (create(".md"), "path.invalid_name"),
+        (update(" a.md", "x"), "path.invalid_name"),
+        (create("a\x00b.md"), "path.invalid_name"),
         (create(None, title="a/b"), "title.invalid"),
         (child("..hidden"), "title.invalid"),
     ],
-    ids=["nested", "nested-update", "reserved", "not-markdown", "no-extension", "alias", "blank", "bad-title", "bad-child-title"],
+    ids=[
+        "nested",
+        "nested-update",
+        "reserved",
+        "not-markdown",
+        "no-extension",
+        "alias",
+        "blank",
+        "blank-stem",
+        "leading-space",
+        "control-char",
+        "bad-title",
+        "bad-child-title",
+    ],
 )
 def test_an_invalid_operation_fails_with_its_code_and_is_never_delegated(
     tmp_path: Path, operation: Any, code: str
@@ -556,6 +573,54 @@ def test_a_push_failure_with_nothing_written_is_reported_on_the_skipped_operatio
 
     assert result.results[0].status is FAILED
     assert "[github_wiki:network.unreachable]" in (result.results[0].message or "")
+
+
+# -- a write that git ignores is never silent --------------------------------------------------------------------
+
+
+def test_a_page_hidden_by_gitignore_fails_its_operation_and_names_the_path(tmp_path: Path) -> None:
+    harness = build(tmp_path)
+    harness.fake.ignored.add("Secret.md")
+
+    result = harness.provider.apply_changes(change_set(create("Home.md"), create("Secret.md")))
+
+    home, secret = result.results
+    assert home.status is APPLIED and secret.status is FAILED
+    message = secret.message or ""
+    assert "[github_wiki:commit.failed]" in message
+    assert "'Secret.md'" in message
+    assert "ignored by git" in message and ".gitignore" in message and "info/exclude" in message
+    assert "Hint: remove the ignore rule or rename the page." in message
+    assert harness.fake.commits[0].paths == ("Home.md",)  # the visible page is still committed
+    assert "committed" in (home.message or "")
+    assert "committed locally" not in message  # the commit note belongs to the page that went in
+
+
+def test_an_apply_where_every_page_is_ignored_commits_nothing_and_fails_each_one(tmp_path: Path) -> None:
+    harness = build(tmp_path)
+    harness.fake.ignored.update({"A.md", "B.md"})
+
+    result = harness.provider.apply_changes(change_set(create("A.md"), create("B.md")))
+
+    assert [item.status for item in result.results] == [FAILED, FAILED]
+    assert "'A.md'" in (result.results[0].message or "")
+    assert "'B.md'" in (result.results[1].message or "")
+    assert harness.fake.commits == []
+    assert "commit" not in subcommands(harness)
+
+
+def test_an_asset_hidden_by_gitignore_is_refused_naming_its_path(tmp_path: Path) -> None:
+    harness = build(tmp_path)
+    path = harness.provider.put_asset(asset(), b"\x89PNGdata").ref.locator["path"]
+    harness.fake.ignored.add(path)
+
+    with pytest.raises(GithubWikiError) as raised:
+        harness.provider.put_asset(asset(), b"\x89PNGdata")
+
+    assert raised.value.code == "commit.failed"
+    assert f"'{path}'" in str(raised.value) and "ignored by git" in str(raised.value)
+    assert "remove the ignore rule or rename the page" in str(raised.value)
+    assert manifest_of(harness) == {}
 
 
 # -- what counts as written: only the SDK result fields -----------------------------------------------------------

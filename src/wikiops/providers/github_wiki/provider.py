@@ -27,7 +27,7 @@ import shutil
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, NoReturn, Optional
 
 from wikiops_sdk.contracts import DocumentProvider
 from wikiops_sdk.domain import (
@@ -44,7 +44,7 @@ from wikiops_sdk.domain import (
     PutAssetOperation,
 )
 
-from wikiops.providers.github_wiki import layout, writes
+from wikiops.providers.github_wiki import layout, rollback, writes
 from wikiops.providers.github_wiki.errors import GithubWikiError, render_message
 from wikiops.providers.github_wiki.git import Git
 from wikiops.providers.github_wiki.lock import WorkdirLock
@@ -230,10 +230,36 @@ class GithubWikiProvider:
         sync = self._wiki_sync()
         with sync.lock.hold("apply"):
             sync.recheck()
-            asset = backend.put_asset(operation, content)
-            layout.build_asset_reference(asset.ref)
-            sync.manifest.record([asset.ref.locator["path"]])
+            before = rollback.take_snapshot(self._git_facade())
+            try:
+                asset = backend.put_asset(operation, content)
+            except Exception as error:  # noqa: BLE001 - undo what it wrote, then report it as is
+                self._fail_after_write(error, before, writes.asset_owner(operation, content))
+            reported = asset.ref.locator.get("path")
+            try:
+                layout.build_asset_reference(asset.ref)
+                if self._git_facade().ignored_paths([reported]):
+                    raise writes.ignored_error([reported], workdir=self._resolved_workdir())
+                sync.manifest.record([reported])
+            except Exception as error:  # noqa: BLE001 - the backend already wrote the file
+                self._fail_after_write(
+                    error, before, writes.asset_owner(operation, content, reported=reported)
+                )
         return asset
+
+    def _fail_after_write(
+        self, error: Exception, before: rollback.Snapshot, owns: Callable[[str], bool]
+    ) -> NoReturn:
+        """Undo what the failed write left in the clone, then raise ``error`` with what is left.
+
+        Only the paths ``owns`` accepts and that appeared since ``before`` are touched; the
+        rest of the clone is reported, never altered (see ``rollback``).
+        """
+        outcome = rollback.roll_back(self._git_facade(), before=before, owns=owns)
+        raised = rollback.annotate(error, outcome)
+        if raised is error:
+            raise error
+        raise raised from error
 
     def apply_changes(self, changeset: ChangeSet) -> ApplyResult:
         """Write the pages through the backend, then commit and push what it reported.
@@ -265,17 +291,48 @@ class GithubWikiProvider:
             prepared = writes.prepare(operations, provider_name=self.settings.provider_name)
             if not prepared.delegated:
                 return writes.in_order(operations, prepared.failures)
-            reply = backend.apply_changes(
-                changeset.model_copy(update={"operations": list(prepared.delegated)})
-            )
-            settled = writes.settle(prepared.delegated, reply)
-            # Before anything else can fail: whatever the backend reported is wikiops' own
-            # pending work, never a foreign change at the next run.
-            sync.manifest.record(settled.written)
+            before = rollback.take_snapshot(self._git_facade())
+            try:
+                reply = backend.apply_changes(
+                    changeset.model_copy(update={"operations": list(prepared.delegated)})
+                )
+            except Exception as error:  # noqa: BLE001 - undo a partial write, then report the failure
+                self._fail_after_write(error, before, writes.rollback_owner(prepared.delegated))
+            settled = self._accepted(sync, prepared.delegated, reply, before)
             results = writes.in_order(operations, prepared.failures, settled.results)
             if all(item.status is OperationStatus.FAILED for item in results):
                 return results  # a failed apply leaves the history as it was
             return self._publish(sync, changeset.plugin_id, settled, results)
+
+    def _accepted(
+        self,
+        sync: WikiSync,
+        delegated: tuple[Any, ...],
+        reply: ApplyResult,
+        before: rollback.Snapshot,
+    ) -> writes.Settled:
+        """Validate what the backend reported and make the clone match it.
+
+        What the provider refuses is rolled back (it is not wikiops' pending work and would
+        block the next run); what it accepts is recorded before anything else can fail, so
+        it is never a foreign change at the next run. The rollback is confined to the pages and
+        assets of the rejected operations, and what it leaves is said on their results.
+        """
+        try:
+            settled = writes.settle(delegated, reply)
+            if settled.rejected:
+                rejected = [op for op in delegated if op.operation_id in settled.rejected]
+                outcome = rollback.roll_back(
+                    self._git_facade(),
+                    before=before,
+                    owns=writes.rollback_owner(rejected, reply),
+                    keep=settled.written,
+                )
+                settled = writes.note_rollback(settled, outcome)
+            sync.manifest.record(settled.written)
+        except Exception as error:  # noqa: BLE001 - nothing the backend wrote may stay behind
+            self._fail_after_write(error, before, writes.rollback_owner(delegated, reply))
+        return settled
 
     def _publish(
         self,
@@ -306,6 +363,7 @@ class GithubWikiProvider:
             page_count=len(settled.pages),
             unpushed=sync.unpushed_commits() if settings.allow_auto_push else 0,
         )
+        results = writes.fail_ignored(results, outcome.ignored, workdir=outcome.workdir)
         return writes.annotate(results, note=outcome.note, error=outcome.error)
 
     # -- host hook ---------------------------------------------------------------------

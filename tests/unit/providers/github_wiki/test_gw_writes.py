@@ -14,6 +14,7 @@ from wikiops_sdk.domain import (
 )
 
 from tests.support.write_ops import asset, asset_ref, child, create, ref, update
+from wikiops.providers._fs import hashed_asset_name
 from wikiops.providers.github_wiki import writes
 from wikiops.providers.github_wiki.errors import GithubWikiError
 
@@ -266,3 +267,94 @@ def test_in_order_leaves_out_an_operation_no_source_answered() -> None:
     ordered = writes.in_order([answered, unanswered], {answered.operation_id: result(answered, path="A.md")})
 
     assert [item.operation_id for item in ordered] == [answered.operation_id]
+
+
+# -- what an operation owns (the rollback never goes beyond it) ----------------------------------
+
+
+def test_page_targets_are_the_pages_the_operations_carry_not_what_a_backend_reports() -> None:
+    created, updated, nested, uploaded = create("A.md"), update("B.md", "z"), create("x/y.md"), asset()
+
+    targets = writes.page_targets([created, updated, nested, uploaded])
+
+    assert targets == frozenset({"A.md", "B.md"})  # nested is invalid, an asset has no page
+
+
+def test_page_targets_of_nothing_is_empty() -> None:
+    assert writes.page_targets([]) == frozenset()
+
+
+def test_an_asset_owns_its_content_hashed_name_in_any_directory_and_the_reported_path() -> None:
+    owns = writes.asset_owner(asset("logo.png"), b"bytes", reported="assets/reported.png")
+
+    stored = hashed_asset_name("logo.png", b"bytes")
+    assert owns(f"assets/{stored}") and owns(f"other/{stored}")
+    assert owns("assets/reported.png")
+    assert not owns("assets/logo--0000000000000000.png")  # same stem, other bytes
+    assert not owns("assets/notes.txt")
+
+
+# -- rollback ownership of a whole changeset (pages AND assets) ---------------------------------
+
+
+def test_asset_owner_without_content_owns_any_content_hash_of_the_asset_name() -> None:
+    owns = writes.asset_owner(asset("logo.png"), None)
+
+    assert owns(f"assets/{hashed_asset_name('logo.png', b'one')}")
+    assert owns(f"assets/{hashed_asset_name('logo.png', b'two')}")
+    assert owns(f"other/{hashed_asset_name('logo.png', b'two')}")
+    assert not owns("assets/logo--nothex0000000000.png")  # not a content hash
+    assert not owns("assets/logo--0123.png")  # hash too short
+    assert not owns(f"assets/{hashed_asset_name('logo.jpg', b'one')}")  # other suffix
+    assert not owns(f"assets/{hashed_asset_name('chart.png', b'one')}")  # other stem
+    assert not owns("assets/logo.png")
+
+
+def test_the_rollback_owner_of_a_changeset_covers_its_pages_and_its_assets() -> None:
+    created, uploaded = create("A.md"), asset("logo.png")
+
+    owns = writes.rollback_owner([created, uploaded])
+
+    assert owns("A.md")
+    assert owns(f"assets/{hashed_asset_name('logo.png', b'any bytes')}")
+    assert not owns("B.md")
+    assert not owns("notes.txt")
+
+
+def test_the_rollback_owner_adds_the_asset_path_the_backend_reported_for_that_operation() -> None:
+    uploaded, other = asset("logo.png"), asset("chart.png", "chart")
+    reply = ApplyResult(
+        provider_name="docs",
+        results=[
+            AppliedOperationResult(
+                operation_id=uploaded.operation_id,
+                status=APPLIED,
+                resolved_asset_ref=asset_ref("assets/odd name.png"),
+            ),
+            AppliedOperationResult(
+                operation_id="unrelated",
+                status=APPLIED,
+                resolved_asset_ref=asset_ref("assets/not-mine.png"),
+            ),
+        ],
+    )
+
+    owns = writes.rollback_owner([uploaded, other], reply)
+
+    assert owns("assets/odd name.png")
+    assert not owns("assets/not-mine.png")  # reported by a result of an operation it does not own
+
+
+def test_the_rollback_owner_of_a_page_only_changeset_owns_pages_alone() -> None:
+    owns = writes.rollback_owner([create("A.md"), update("B.md", "z")])
+
+    assert owns("A.md") and owns("B.md")
+    assert not owns("assets/anything--0123456789abcdef.png")
+
+
+def test_an_asset_without_a_usable_name_owns_only_what_was_reported() -> None:
+    nameless = asset("logo.png").model_copy(update={"name": None})
+    owns = writes.asset_owner(nameless, b"bytes", reported="assets/x.png")
+
+    assert owns("assets/x.png")
+    assert not owns("assets/logo--anything.png")
