@@ -60,6 +60,9 @@ addopts = "--strict-config --strict-markers -ra --cov=wikiops --cov-branch --cov
 testpaths = ["tests"]
 pythonpath = ["src"]
 xfail_strict = true
+markers = [
+    "git_integration: real git against file:// bare repositories (runs by default in CI)",
+]
 required_plugins = ["pytest-cov"]
 
 [tool.coverage.run]
