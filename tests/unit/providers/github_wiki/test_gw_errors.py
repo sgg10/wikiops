@@ -56,6 +56,7 @@ EXPECTED_CODES = frozenset(
         "workdir.locked",
         "path.nested_not_supported",
         "path.reserved",
+        "path.invalid_name",
         "path.not_markdown",
         "ref.unsupported_kind",
         "ref.missing_path",
@@ -74,7 +75,7 @@ MESSAGE_SHAPE = re.compile(r"^\[github_wiki:[a-z_]+\.[a-z_]+\] .+ Hint: .+\.$")
 
 
 def test_code_table_matches_final_spec_exactly() -> None:
-    assert len(EXPECTED_CODES) == 47
+    assert len(EXPECTED_CODES) == 48
     assert set(CODES) == EXPECTED_CODES
 
 
@@ -87,7 +88,7 @@ def test_only_stale_plan_is_a_warning() -> None:
     errors = {code for code, spec in CODES.items() if spec.kind == "E"}
 
     assert warnings == {"sync.stale_plan"}
-    assert len(errors) == 46
+    assert len(errors) == 47
 
 
 @pytest.mark.parametrize("code", sorted(EXPECTED_CODES))

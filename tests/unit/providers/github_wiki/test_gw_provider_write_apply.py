@@ -419,10 +419,26 @@ ALIAS_REF = DocumentRef(provider="", kind=RefKind.ALIAS, alias="home")
         (update("README", "x"), "path.not_markdown"),
         (CreateDocumentOperation(ref=ALIAS_REF, title="T", content="x"), "ref.unsupported_kind"),
         (create("  ", title="T"), "ref.missing_path"),
+        (create(".md"), "path.invalid_name"),
+        (update(" a.md", "x"), "path.invalid_name"),
+        (create("a\x00b.md"), "path.invalid_name"),
         (create(None, title="a/b"), "title.invalid"),
         (child("..hidden"), "title.invalid"),
     ],
-    ids=["nested", "nested-update", "reserved", "not-markdown", "no-extension", "alias", "blank", "bad-title", "bad-child-title"],
+    ids=[
+        "nested",
+        "nested-update",
+        "reserved",
+        "not-markdown",
+        "no-extension",
+        "alias",
+        "blank",
+        "blank-stem",
+        "leading-space",
+        "control-char",
+        "bad-title",
+        "bad-child-title",
+    ],
 )
 def test_an_invalid_operation_fails_with_its_code_and_is_never_delegated(
     tmp_path: Path, operation: Any, code: str

@@ -109,9 +109,10 @@ Match the code with `^\[(?P<ns>[a-z_]+):(?P<code>[a-z_]+(\.[a-z_]+)*)\]`, then r
 | Code | How to react |
 | --- | --- |
 | `path.nested_not_supported` | The path contains `/`. Use the flat name from the hint after the user agrees. |
-| `path.reserved` | A `.git` segment or an unsafe character in the page name. Pick another name. |
+| `path.reserved` | A `.git` segment in the path. Pick another name. |
+| `path.invalid_name` | The page name is blank before `.md`, has a control character, or has leading or trailing whitespace. Use the corrected name from the hint after the user agrees. |
 | `path.not_markdown` | Use the `.md` name from the hint. |
-| `ref.unsupported_kind` / `ref.missing_path` | Use `kind: path` with a `locator.path` that has a name before `.md`. |
+| `ref.unsupported_kind` / `ref.missing_path` | Use `kind: path` with a non-blank `locator.path`. |
 | `title.invalid` | The title cannot become a page name. Give a plain title or set an explicit `ref`. |
 | `asset.ref_unsupported` / `link.root_anchored` / `link.raw_url` | The backend reported an asset reference or link the wiki cannot use. Check the `local_backend` options; do not work around it with raw URLs. |
 

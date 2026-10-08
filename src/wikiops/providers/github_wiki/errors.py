@@ -132,6 +132,10 @@ CODES: dict[str, CodeSpec] = {
         "use a flat page name; replace path separators with '-'"
     ),
     "path.reserved": _e("choose a page path outside the reserved '.git' directory"),
+    "path.invalid_name": _e(
+        "use a page name with at least one visible character, no control characters "
+        "and no leading or trailing whitespace"
+    ),
     "path.not_markdown": _e("use a page path ending in '.md'"),
     "ref.unsupported_kind": _e("use a path reference (kind 'path') for wiki pages"),
     "ref.missing_path": _e("provide locator.path for the page reference"),

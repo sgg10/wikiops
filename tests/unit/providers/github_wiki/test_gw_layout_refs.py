@@ -162,10 +162,9 @@ def test_page_without_md_suffix_is_not_markdown(path: str, suggestion: str) -> N
     assert f"'{suggestion}'" in error.hint
 
 
-# A stem that is empty or whitespace-only leaves a path with no page name at all,
-# the same situation as a blank path (`ref.missing_path`). The closed code
-# vocabulary has no dedicated "invalid name" code, and `path.not_markdown` was
-# misleading here: the file name does end in `.md`, it just names nothing.
+# A stem that is empty or whitespace-only leaves a path with no visible page name.
+# `ref.missing_path` stays for a reference without any path; a name that exists but
+# is blank before `.md` is an invalid name (`path.invalid_name`).
 BLANK_STEM_PATHS = [
     pytest.param(".md", id="empty"),
     pytest.param(".MD", id="empty-upper"),
@@ -179,11 +178,14 @@ BLANK_STEM_PATHS = [
 
 
 @pytest.mark.parametrize("path", BLANK_STEM_PATHS)
-def test_page_with_an_empty_stem_has_no_page_name(path: str) -> None:
+def test_page_with_an_empty_stem_is_an_invalid_name(path: str) -> None:
     error = failure(path_ref(path))
 
-    assert error.code == "ref.missing_path"
+    assert error.code == "path.invalid_name"
+    assert error.context["path"] == path
+    assert "blank" in error.summary
     assert "before '.md'" in error.hint
+    assert "'Home.md'" in error.hint
     assert MESSAGE_SHAPE.match(str(error))
 
 
@@ -223,15 +225,53 @@ UNSAFE_NAMES = [
 def test_unsafe_flat_names_are_rejected(path: str, reason: str) -> None:
     error = failure(path_ref(path))
 
-    assert error.code == "path.reserved"
+    assert error.code == "path.invalid_name"
+    assert error.context["path"] == path
     assert reason in error.summary
+    assert reason in error.hint
     assert MESSAGE_SHAPE.match(str(error))
     assert "\n" not in str(error) and "\x00" not in str(error)
 
 
+# The Hint names a corrected, valid page name whenever one exists.
+CORRECTIONS = [
+    pytest.param("a\x00b.md", "a-b.md", id="nul-inside"),
+    pytest.param("a\nb.md", "a-b.md", id="newline-inside"),
+    pytest.param("a\x00\x1bb.md", "a-b.md", id="control-run-inside"),
+    pytest.param("a\x00", "a.md", id="control-without-suffix"),
+    pytest.param("a\x00.md", "a.md", id="control-before-suffix"),
+    pytest.param(" a.md", "a.md", id="leading-space"),
+    pytest.param("\u00a0a.md", "a.md", id="leading-nbsp"),
+    pytest.param("a .md", "a.md", id="space-before-suffix"),
+    pytest.param("a.md ", "a.md", id="trailing-space"),
+    pytest.param("my page .md", "my page.md", id="inner-space-kept"),
+    pytest.param("a.txt\u00a0", "a.md", id="foreign-suffix-replaced"),
+    pytest.param("notes \t", "notes.md", id="suffix-added"),
+    pytest.param(".md\x00.md", ".md.md", id="literal-md-stem-is-a-valid-name"),
+]
+
+
+@pytest.mark.parametrize(("path", "corrected"), CORRECTIONS)
+def test_unsafe_name_hint_suggests_a_corrected_valid_name(path: str, corrected: str) -> None:
+    error = failure(path_ref(path))
+
+    assert error.code == "path.invalid_name"
+    assert f"'{corrected}'" in error.hint
+    assert validate_page_ref(path_ref(corrected)) == corrected
+
+
+@pytest.mark.parametrize("path", ["\x00", "\x00.md", "\x00\x1b.md", "\x00.md\x00"])
+def test_unsafe_name_without_a_usable_correction_gets_a_generic_hint(path: str) -> None:
+    error = failure(path_ref(path))
+
+    assert error.code == "path.invalid_name"
+    assert "use '" not in error.hint
+    assert "visible" in error.hint
+
+
 def test_unsafe_names_are_reported_before_the_markdown_suffix_rule() -> None:
-    assert failure(path_ref("notes\x00.txt")).code == "path.reserved"
-    assert failure(path_ref("notes.txt ")).code == "path.reserved"
+    assert failure(path_ref("notes\x00.txt")).code == "path.invalid_name"
+    assert failure(path_ref("notes.txt ")).code == "path.invalid_name"
 
 
 @pytest.mark.parametrize("path", ["a\x00/b.md", "a/\x00.md"])

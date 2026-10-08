@@ -162,8 +162,8 @@ A GitHub wiki is a flat set of root-level Markdown pages. Only path refs are sup
 - `kind` must be `path` (`ref.unsupported_kind` otherwise) and `locator.path` is required (`ref.missing_path`)
 - the path is a root page name that **ends in `.md`**, case-insensitive (`path.not_markdown`); the provider never appends the extension
 - the path must not contain separators: `guides/setup.md` fails with `path.nested_not_supported`, and the hint proposes the flat name `guides-setup.md`. The provider never flattens names on its own
-- a `.git` segment is reserved (`path.reserved`), as are control characters and surrounding whitespace in the name
-- a blank stem such as `.md` is `ref.missing_path`
+- a `.git` segment is reserved (`path.reserved`)
+- a name that exists but cannot be used is `path.invalid_name`: a blank stem such as `.md` or ` .md`, control characters (including NUL), and leading or trailing whitespace (also right before `.md`). The Hint states the exact problem and, when one exists, a corrected name (control-character runs become `-`, surrounding whitespace is dropped)
 
 Operations without a `ref` derive a root page from the title: whitespace runs become `-`, case and Unicode are preserved, and `.md` is appended (`Release Notes` becomes `Release-Notes.md`). A title that would need a separator, starts with `.`, or contains control or reserved characters (`/ \ : * ? " < > |`) fails with `title.invalid`. A `create_child_document` operation creates a **root page** too: wiki pages have no hierarchy, so the provider does not advertise `HIERARCHICAL_PAGES`.
 
@@ -286,10 +286,11 @@ Failures during apply appear as `FAILED` entries in `=== APPLY RESULT ===`; the 
 | `workdir.dirty` | Foreign changes exist in the clone | Commit, stash, or discard the listed paths, or change `workdir` |
 | `workdir.locked` | Another wikiops run holds the clone's lock | Wait for it and retry |
 | `path.nested_not_supported` | The page path contains a separator | Use the flat name from the hint |
-| `path.reserved` | A `.git` segment or unsafe characters in the name | Choose another page name |
+| `path.reserved` | A `.git` segment in the path | Choose another page name |
+| `path.invalid_name` | The name is blank before `.md`, has control characters, or has leading or trailing whitespace | Use the corrected name from the hint |
 | `path.not_markdown` | The page path does not end in `.md` | Use the name from the hint |
 | `ref.unsupported_kind` | The ref is not `kind: path` | Use path refs |
-| `ref.missing_path` | `locator.path` is missing or has a blank stem, or the backend reported no page reference | Set `locator.path`; a backend must report `resolved_ref` |
+| `ref.missing_path` | `locator.path` is missing or blank, or the backend reported no page reference | Set `locator.path`; a backend must report `resolved_ref` |
 | `title.invalid` | The title cannot become a page name | Use a plain title or set an explicit `ref` |
 | `asset.ref_unsupported` | The asset reference is not a canonical root-relative path | Use a path asset reference under the wiki root |
 | `link.root_anchored` | A reported link starts with `/` | Use a document-relative link |

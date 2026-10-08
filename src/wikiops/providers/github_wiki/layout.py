@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import posixpath
 import re
+from typing import NamedTuple
 from urllib.parse import quote
 
 from wikiops_sdk.domain import AssetRef, AssetRefKind, DocumentRef, RefKind
@@ -26,7 +27,7 @@ from wikiops.providers.github_wiki.settings import (
     check_host,
     check_repository,
 )
-from wikiops.providers.github_wiki.text import has_control_characters
+from wikiops.providers.github_wiki.text import CONTROL_CHARACTERS, has_control_characters
 
 _MARKDOWN_SUFFIX = ".md"
 _FOREIGN_MARKDOWN_SUFFIXES = frozenset({".markdown", ".mdx", ".txt"})
@@ -81,7 +82,17 @@ def _nested_error(path: str) -> GithubWikiError:
     )
 
 
-def _unsafe_name_problem(path: str, *, has_suffix: bool) -> str | None:
+class _NameProblem(NamedTuple):
+    """Why a flat page name is unusable and the action that fixes it."""
+
+    reason: str
+    fix: str
+
+
+_NAME_EXAMPLE = "'Home.md'"
+
+
+def _unsafe_name_problem(path: str, *, has_suffix: bool) -> _NameProblem | None:
     """Return why the flat page name ``path`` is unsafe, or ``None`` when it is fine.
 
     Control characters (including NUL) and leading or trailing whitespace are
@@ -91,11 +102,36 @@ def _unsafe_name_problem(path: str, *, has_suffix: bool) -> str | None:
     the stem.
     """
     if has_control_characters(path):
-        return "it contains control characters"
+        return _NameProblem("it contains control characters", "remove the control characters")
     stem = path[: -len(_MARKDOWN_SUFFIX)] if has_suffix else path
     if path != path.strip() or stem != stem.strip():
-        return "it starts or ends with whitespace"
+        return _NameProblem(
+            "it starts or ends with whitespace", "remove the leading and trailing whitespace"
+        )
     return None
+
+
+def _corrected_name(path: str, *, has_suffix: bool) -> str:
+    """Return a valid page name derived from the unsafe ``path``, or ``""`` when none exists.
+
+    Runs of control characters become one ``-``, whitespace around the stem is
+    dropped (inner spaces stay) and ``.md`` is appended unless present. Nothing
+    is returned when no visible character is left before ``.md``.
+    """
+    stem = path[: -len(_MARKDOWN_SUFFIX)] if has_suffix else path
+    pieces = (piece.strip() for piece in CONTROL_CHARACTERS.split(stem))
+    name = "-".join(piece for piece in pieces if piece)
+    if not name:
+        return ""
+    if has_suffix:
+        name = f"{name}{_MARKDOWN_SUFFIX}"
+    elif not name.lower().endswith(_MARKDOWN_SUFFIX):
+        name = _suggest_markdown_name(name)
+    return name if name[: -len(_MARKDOWN_SUFFIX)].strip() else ""
+
+
+def _invalid_name_error(summary: str, *, path: str, hint: str) -> GithubWikiError:
+    return GithubWikiError("path.invalid_name", summary, context={"path": path}, hint=hint)
 
 
 def validate_page_ref(ref: DocumentRef) -> str:
@@ -105,15 +141,16 @@ def validate_page_ref(ref: DocumentRef) -> str:
     (``ref.unsupported_kind``), presence of a path (``ref.missing_path``), a
     ``.git`` component (``path.reserved``), any path separator
     (``path.nested_not_supported``), a blank stem before ``.md``
-    (``ref.missing_path``), an unsafe name (``path.reserved``) and the ``.md``
-    suffix, case-insensitive (``path.not_markdown``). The returned name is the
-    path unchanged.
+    (``path.invalid_name``), an unsafe name (``path.invalid_name``) and the
+    ``.md`` suffix, case-insensitive (``path.not_markdown``). The returned name
+    is the path unchanged.
 
-    Code choices: the closed vocabulary has no "invalid name" code. A stem that
-    is empty or whitespace-only means the reference names no page at all, which
-    is what ``ref.missing_path`` already reports for a blank path. A name with
-    control characters or surrounding whitespace is a name the wiki refuses to
-    use, reported as ``path.reserved`` with the exact reason in the summary.
+    Code choices: ``ref.missing_path`` is only for a reference that carries no
+    path at all (absent or blank). A name that exists but cannot be used (a
+    stem that is empty or whitespace-only, control characters, or surrounding
+    whitespace) is ``path.invalid_name``; its Hint states the exact problem and
+    suggests a corrected name when one exists. ``path.reserved`` stays for the
+    ``.git`` component.
     """
     if ref.kind is not RefKind.PATH:
         raise GithubWikiError(
@@ -139,19 +176,28 @@ def validate_page_ref(ref: DocumentRef) -> str:
         raise _nested_error(path)
     has_suffix = path.lower().endswith(_MARKDOWN_SUFFIX)
     if has_suffix and not path[: -len(_MARKDOWN_SUFFIX)].strip():
-        raise GithubWikiError(
-            "ref.missing_path",
-            "The page reference has no page name before '.md'",
-            context={"path": path},
-            hint="use a page name with at least one character before '.md', such as 'Home.md'",
+        raise _invalid_name_error(
+            "The page name is blank: there is no visible character before '.md'",
+            path=path,
+            hint=(
+                "use a page name with at least one visible character before '.md', "
+                f"such as {_NAME_EXAMPLE}"
+            ),
         )
     problem = _unsafe_name_problem(path, has_suffix=has_suffix)
     if problem is not None:
-        raise GithubWikiError(
-            "path.reserved",
-            f"The page name is not allowed: {problem}",
-            context={"path": path},
-            hint="use a page name without control characters or surrounding whitespace",
+        corrected = _corrected_name(path, has_suffix=has_suffix)
+        raise _invalid_name_error(
+            f"The page name is not allowed: {problem.reason}",
+            path=path,
+            hint=(
+                f"{problem.fix} and use '{corrected}'"
+                if corrected
+                else (
+                    f"{problem.fix} and use a page name with at least one visible "
+                    f"character, such as {_NAME_EXAMPLE}"
+                )
+            ),
         )
     if not has_suffix:
         raise GithubWikiError(
