@@ -32,6 +32,7 @@ from tests.support.write_ops import (
     result_for,
     update,
 )
+from wikiops.providers._fs import hashed_asset_name
 from wikiops.providers.github_wiki import rollback
 from wikiops.providers.github_wiki.errors import GithubWikiError
 from wikiops.providers.github_wiki.manifest import PendingManifest
@@ -292,6 +293,123 @@ def test_a_second_accepted_page_is_neither_rolled_back_nor_reported_as_foreign(t
 
     assert "Good.md" not in (result_for(result, bad).message or "")
     assert "left untouched" not in (result_for(result, bad).message or "")
+
+
+# -- an asset operation inside a changeset is owned by the rollback too (S14) -------------------------------
+
+
+def asset_written_by_the_backend(
+    harness: ProviderHarness, operation: Any, *, name: str | None = None, report: str | None = None
+) -> Any:
+    """``on_apply`` hook: the backend stores the asset, then reports it without a page ref.
+
+    ``name`` is the stored file name (the content-hashed one by default); ``report`` is the
+    path the result carries (the stored one by default).
+    """
+    stored = name or hashed_asset_name("logo.png", PNG)
+    relative = f"assets/{stored}"
+
+    def write(changeset: Any, real: ApplyResult) -> ApplyResult:
+        (harness.workdir / "assets").mkdir(exist_ok=True)
+        (harness.workdir / relative).write_bytes(PNG)
+        results = [
+            item.model_copy(
+                update={
+                    "status": APPLIED,
+                    "resolved_asset_ref": AssetRef(
+                        provider="docs", kind=AssetRefKind.PATH, locator={"path": report or relative}
+                    ),
+                }
+            )
+            if item.operation_id == operation.operation_id
+            else item
+            for item in real.results
+        ]
+        return ApplyResult(provider_name=real.provider_name, results=results)
+
+    return write
+
+
+def test_a_rejected_asset_operation_inside_a_changeset_is_rolled_back(tmp_path: Path) -> None:
+    harness, backend = scripted(tmp_path)
+    operation = asset("logo.png")
+    backend.on_apply = asset_written_by_the_backend(harness, operation)
+
+    result = harness.provider.apply_changes(change_set(operation))
+
+    stored = harness.workdir / "assets" / hashed_asset_name("logo.png", PNG)
+    assert result_for(result, operation).status is FAILED
+    assert (result_for(result, operation).message or "").startswith("[github_wiki:ref.missing_path]")
+    assert not stored.exists()
+    assert_next_apply_is_not_blocked(harness, backend)
+
+
+def test_a_rejected_asset_stored_under_an_unexpected_name_is_rolled_back_by_its_reported_path(
+    tmp_path: Path,
+) -> None:
+    harness, backend = scripted(tmp_path)
+    operation = asset("logo.png")
+    backend.on_apply = asset_written_by_the_backend(harness, operation, name="renamed.png")
+
+    result = harness.provider.apply_changes(change_set(operation))
+
+    assert result_for(result, operation).status is FAILED
+    assert not (harness.workdir / "assets" / "renamed.png").exists()
+    assert_next_apply_is_not_blocked(harness, backend)
+
+
+def test_a_rejected_asset_does_not_take_the_accepted_page_with_it(tmp_path: Path) -> None:
+    harness, backend = scripted(tmp_path)
+    good, uploaded = create("Good.md", "# good\n"), asset("logo.png")
+    backend.on_apply = asset_written_by_the_backend(harness, uploaded)
+
+    result = harness.provider.apply_changes(change_set(good, uploaded))
+
+    assert result_for(result, good).status is APPLIED
+    assert result_for(result, uploaded).status is FAILED
+    assert (harness.workdir / "Good.md").exists()
+    assert not (harness.workdir / "assets" / hashed_asset_name("logo.png", PNG)).exists()
+    assert "Good.md" in harness.fake.commits[0].paths
+    assert not any(path.startswith("assets/logo--") for path in harness.fake.commits[0].paths)
+    assert_next_apply_is_not_blocked(harness, backend)
+
+
+def test_an_unrelated_file_next_to_a_rejected_asset_is_still_left_alone_and_named(tmp_path: Path) -> None:
+    harness, backend = scripted(tmp_path)
+    operation = asset("logo.png")
+    write_asset = asset_written_by_the_backend(harness, operation)
+
+    def asset_and_user_file(changeset: Any, real: ApplyResult) -> ApplyResult:
+        (harness.workdir / "mine.md").write_text("the user's own file")
+        return write_asset(changeset, real)
+
+    backend.on_apply = asset_and_user_file
+
+    result = harness.provider.apply_changes(change_set(operation))
+
+    message = result_for(result, operation).message or ""
+    assert not (harness.workdir / "assets" / hashed_asset_name("logo.png", PNG)).exists()
+    assert (harness.workdir / "mine.md").read_text() == "the user's own file"
+    assert "'mine.md'" in message and "not part of" in message
+
+
+def test_a_backend_that_raises_after_writing_an_asset_is_rolled_back(tmp_path: Path) -> None:
+    harness, backend = scripted(tmp_path)
+    operation = asset("logo.png")
+    write_asset = asset_written_by_the_backend(harness, operation)
+
+    def write_then_raise(changeset: Any, real: ApplyResult) -> ApplyResult:
+        write_asset(changeset, real)
+        raise RuntimeError("disk exploded")
+
+    backend.on_apply = write_then_raise
+
+    result = harness.provider.apply_changes(change_set(operation))
+
+    assert result_for(result, operation).status is FAILED
+    assert "disk exploded" in (result_for(result, operation).message or "")
+    assert not (harness.workdir / "assets" / hashed_asset_name("logo.png", PNG)).exists()
+    assert_next_apply_is_not_blocked(harness, backend)
 
 
 # -- a backend that raises after writing is rolled back the same way ---------------------------------------

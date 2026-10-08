@@ -13,12 +13,15 @@ forward blindly:
   them are never part of the written set, so they can never be staged.
 * ``fail_ignored`` and ``ignored_error`` turn a write that git ignores into a loud failure.
 * ``annotate`` maps what publishing did (a note, or a coded error) onto the results.
-* ``page_targets`` and ``asset_owner`` say which paths an operation is the one to write,
-  which is all the rollback may touch if it has to undo that operation.
+* ``page_targets``, ``asset_owner`` and ``rollback_owner`` say which paths an operation (a
+  page write or an asset upload, whether sent alone or inside a change set) is the one to
+  write, which is all the rollback may touch if it has to undo that operation.
 """
 
 from __future__ import annotations
 
+import hashlib
+import re
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -31,6 +34,7 @@ from wikiops_sdk.domain import (
     CreateDocumentOperation,
     DocumentRef,
     OperationStatus,
+    PutAssetOperation,
     UpdateDocumentOperation,
 )
 
@@ -119,24 +123,73 @@ def page_targets(operations: Iterable[Any]) -> frozenset[str]:
     return frozenset(targets)
 
 
+def _hash_pattern(name: object) -> re.Pattern[str] | None:
+    """The file name any content of the asset ``name`` is stored under, hash left open.
+
+    ``None`` when the backend would refuse the name before writing anything.
+    """
+    probe = hashlib.sha256(b"").hexdigest()[:16]
+    try:
+        prefix, _, suffix = hashed_asset_name(name if isinstance(name, str) else None, b"").rpartition(probe)
+    except FsError:
+        return None
+    return re.compile(rf"{re.escape(prefix)}[0-9a-f]{{{len(probe)}}}{re.escape(suffix)}")
+
+
 def asset_owner(
-    operation: Any, content: bytes, *, reported: object = None
+    operation: Any, content: bytes | None, *, reported: object = None
 ) -> Callable[[str], bool]:
     """Whether a path is the file this asset upload writes.
 
     Backends store an asset under the content-hashed name of its file name; the path the
-    backend reported (when it did) counts too. Anything else that appeared meanwhile is not
-    this upload's.
+    backend reported (when it did) counts too. Without ``content`` (an upload sent inside a
+    change set carries only a source) any hash of that name counts. Anything else that
+    appeared meanwhile is not this upload's.
     """
-    try:
-        stored_name: str | None = hashed_asset_name(getattr(operation, "name", None), content)
-    except FsError:
-        stored_name = None  # the backend refuses such an asset before it writes anything
+    name = getattr(operation, "name", None)
+    if content is None:
+        pattern = _hash_pattern(name)
+        stored = None if pattern is None else pattern.fullmatch
+    else:
+        try:
+            exact = hashed_asset_name(name, content)
+        except FsError:
+            exact = None  # the backend refuses such an asset before it writes anything
+        stored = None if exact is None else exact.__eq__
 
     def owns(path: str) -> bool:
-        return path == reported or (stored_name is not None and PurePosixPath(path).name == stored_name)
+        return path == reported or (stored is not None and bool(stored(PurePosixPath(path).name)))
 
     return owns
+
+
+def _reported_asset_path(operation: Any, reply: ApplyResult | None) -> str | None:
+    """The asset path the backend reported for ``operation``, if it reported one."""
+    if reply is None:
+        return None
+    for item in reply.results:
+        if item.operation_id == operation.operation_id and item.resolved_asset_ref is not None:
+            return item.resolved_asset_ref.locator.get("path")
+    return None
+
+
+def rollback_owner(
+    operations: Iterable[Any], reply: ApplyResult | None = None
+) -> Callable[[str], bool]:
+    """Whether a path is a file one of ``operations`` writes (pages and assets alike).
+
+    The rollback of a change set may touch only these: the pages the operations carry, the
+    content-hashed names of their asset uploads and the asset path the backend reported for
+    an upload (``reply``). Anything else that appeared meanwhile is not theirs.
+    """
+    delegated = list(operations)
+    pages = page_targets(delegated)
+    uploads = [
+        asset_owner(op, None, reported=_reported_asset_path(op, reply))
+        for op in delegated
+        if isinstance(op, PutAssetOperation)
+    ]
+    return lambda path: path in pages or any(owns(path) for owns in uploads)
 
 
 # -- before the backend -------------------------------------------------------------------

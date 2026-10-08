@@ -294,6 +294,64 @@ def test_an_asset_owns_its_content_hashed_name_in_any_directory_and_the_reported
     assert not owns("assets/notes.txt")
 
 
+# -- rollback ownership of a whole changeset (pages AND assets) ---------------------------------
+
+
+def test_asset_owner_without_content_owns_any_content_hash_of_the_asset_name() -> None:
+    owns = writes.asset_owner(asset("logo.png"), None)
+
+    assert owns(f"assets/{hashed_asset_name('logo.png', b'one')}")
+    assert owns(f"assets/{hashed_asset_name('logo.png', b'two')}")
+    assert owns(f"other/{hashed_asset_name('logo.png', b'two')}")
+    assert not owns("assets/logo--nothex0000000000.png")  # not a content hash
+    assert not owns("assets/logo--0123.png")  # hash too short
+    assert not owns(f"assets/{hashed_asset_name('logo.jpg', b'one')}")  # other suffix
+    assert not owns(f"assets/{hashed_asset_name('chart.png', b'one')}")  # other stem
+    assert not owns("assets/logo.png")
+
+
+def test_the_rollback_owner_of_a_changeset_covers_its_pages_and_its_assets() -> None:
+    created, uploaded = create("A.md"), asset("logo.png")
+
+    owns = writes.rollback_owner([created, uploaded])
+
+    assert owns("A.md")
+    assert owns(f"assets/{hashed_asset_name('logo.png', b'any bytes')}")
+    assert not owns("B.md")
+    assert not owns("notes.txt")
+
+
+def test_the_rollback_owner_adds_the_asset_path_the_backend_reported_for_that_operation() -> None:
+    uploaded, other = asset("logo.png"), asset("chart.png", "chart")
+    reply = ApplyResult(
+        provider_name="docs",
+        results=[
+            AppliedOperationResult(
+                operation_id=uploaded.operation_id,
+                status=APPLIED,
+                resolved_asset_ref=asset_ref("assets/odd name.png"),
+            ),
+            AppliedOperationResult(
+                operation_id="unrelated",
+                status=APPLIED,
+                resolved_asset_ref=asset_ref("assets/not-mine.png"),
+            ),
+        ],
+    )
+
+    owns = writes.rollback_owner([uploaded, other], reply)
+
+    assert owns("assets/odd name.png")
+    assert not owns("assets/not-mine.png")  # reported by a result of an operation it does not own
+
+
+def test_the_rollback_owner_of_a_page_only_changeset_owns_pages_alone() -> None:
+    owns = writes.rollback_owner([create("A.md"), update("B.md", "z")])
+
+    assert owns("A.md") and owns("B.md")
+    assert not owns("assets/anything--0123456789abcdef.png")
+
+
 def test_an_asset_without_a_usable_name_owns_only_what_was_reported() -> None:
     nameless = asset("logo.png").model_copy(update={"name": None})
     owns = writes.asset_owner(nameless, b"bytes", reported="assets/x.png")

@@ -297,7 +297,7 @@ class GithubWikiProvider:
                     changeset.model_copy(update={"operations": list(prepared.delegated)})
                 )
             except Exception as error:  # noqa: BLE001 - undo a partial write, then report the failure
-                self._fail_after_write(error, before, writes.page_targets(prepared.delegated).__contains__)
+                self._fail_after_write(error, before, writes.rollback_owner(prepared.delegated))
             settled = self._accepted(sync, prepared.delegated, reply, before)
             results = writes.in_order(operations, prepared.failures, settled.results)
             if all(item.status is OperationStatus.FAILED for item in results):
@@ -315,8 +315,8 @@ class GithubWikiProvider:
 
         What the provider refuses is rolled back (it is not wikiops' pending work and would
         block the next run); what it accepts is recorded before anything else can fail, so
-        it is never a foreign change at the next run. The rollback is confined to the pages
-        of the rejected operations, and what it leaves is said on their results.
+        it is never a foreign change at the next run. The rollback is confined to the pages and
+        assets of the rejected operations, and what it leaves is said on their results.
         """
         try:
             settled = writes.settle(delegated, reply)
@@ -325,13 +325,13 @@ class GithubWikiProvider:
                 outcome = rollback.roll_back(
                     self._git_facade(),
                     before=before,
-                    owns=writes.page_targets(rejected).__contains__,
+                    owns=writes.rollback_owner(rejected, reply),
                     keep=settled.written,
                 )
                 settled = writes.note_rollback(settled, outcome)
             sync.manifest.record(settled.written)
         except Exception as error:  # noqa: BLE001 - nothing the backend wrote may stay behind
-            self._fail_after_write(error, before, writes.page_targets(delegated).__contains__)
+            self._fail_after_write(error, before, writes.rollback_owner(delegated, reply))
         return settled
 
     def _publish(
