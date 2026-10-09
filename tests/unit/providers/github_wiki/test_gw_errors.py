@@ -16,8 +16,8 @@ from wikiops.providers.github_wiki.errors import (
     render_message,
 )
 
-# Hard-coded copy of the FINAL spec-codes table, minus the three deferred
-# ``sidebar.*`` codes. Changing the vocabulary must be a deliberate edit here.
+# Hard-coded copy of the FINAL spec-codes table. Changing the vocabulary must be a
+# deliberate edit here.
 EXPECTED_CODES = frozenset(
     {
         "config.invalid",
@@ -68,27 +68,65 @@ EXPECTED_CODES = frozenset(
         "commit.failed",
         "push.rejected",
         "push.failed",
+        "sidebar.unmanaged_exists",
+        "sidebar.invalid_hint",
+        "sidebar.write_failed",
     }
 )
+
+SIDEBAR_HINTS = {
+    "sidebar.unmanaged_exists": (
+        "add '<!-- wikiops:managed sidebar -->' as the first line to let wikiops manage it, "
+        "or set generate_sidebar: false"
+    ),
+    "sidebar.invalid_hint": (
+        "expected metadata.github_wiki.sidebar = "
+        "{group?: str<=80, order?: int in -1000000..1000000, label?: str<=80}"
+    ),
+    "sidebar.write_failed": (
+        "fix the cause above and re-run apply to regenerate _Sidebar.md; "
+        "page operations are not affected"
+    ),
+}
 
 MESSAGE_SHAPE = re.compile(r"^\[github_wiki:[a-z_]+\.[a-z_]+\] .+ Hint: .+\.$")
 
 
 def test_code_table_matches_final_spec_exactly() -> None:
-    assert len(EXPECTED_CODES) == 48
+    assert len(EXPECTED_CODES) == 51
     assert set(CODES) == EXPECTED_CODES
 
 
-def test_sidebar_codes_are_deferred() -> None:
-    assert [code for code in CODES if code.startswith("sidebar.")] == []
+def test_the_three_sidebar_codes_are_shipped_as_warnings_of_their_own_family() -> None:
+    sidebar = {code: spec for code, spec in CODES.items() if code.startswith("sidebar.")}
+
+    assert set(sidebar) == set(SIDEBAR_HINTS)
+    assert {spec.kind for spec in sidebar.values()} == {"W"}
 
 
-def test_only_stale_plan_is_a_warning() -> None:
+def test_the_warnings_are_stale_plan_and_the_three_sidebar_codes() -> None:
     warnings = {code for code, spec in CODES.items() if spec.kind == "W"}
     errors = {code for code, spec in CODES.items() if spec.kind == "E"}
 
-    assert warnings == {"sync.stale_plan"}
+    assert warnings == {"sync.stale_plan", *SIDEBAR_HINTS}
     assert len(errors) == 47
+
+
+@pytest.mark.parametrize("code", sorted(SIDEBAR_HINTS))
+def test_each_sidebar_code_carries_its_exact_default_hint(code: str) -> None:
+    assert CODES[code] == CodeSpec("W", SIDEBAR_HINTS[code])
+
+
+@pytest.mark.parametrize("code", sorted(SIDEBAR_HINTS))
+def test_each_sidebar_warning_renders_as_one_line_with_its_hint(code: str) -> None:
+    message = render_message(code, "Something to know", context={"page": "Home"})
+
+    assert message == (
+        f"[github_wiki:{code}] Something to know. page='Home'. "
+        f"Hint: {SIDEBAR_HINTS[code]}."
+    )
+    assert "\n" not in message
+    assert MESSAGE_SHAPE.match(message)
 
 
 @pytest.mark.parametrize("code", sorted(EXPECTED_CODES))
@@ -185,8 +223,8 @@ def test_multi_line_context_values_stay_on_one_logical_line() -> None:
 
 
 def test_unknown_code_is_rejected() -> None:
-    with pytest.raises(ValueError, match="sidebar.unmanaged_exists"):
-        GithubWikiError("sidebar.unmanaged_exists", "Not shipped in this change")
+    with pytest.raises(ValueError, match="sidebar.not_a_code"):
+        GithubWikiError("sidebar.not_a_code", "Not part of the vocabulary")
 
 
 def test_render_message_serves_warnings_that_are_never_raised() -> None:

@@ -29,6 +29,9 @@ from wikiops.providers.github_wiki.settings import (
 )
 from wikiops.providers.github_wiki.text import CONTROL_CHARACTERS, has_control_characters
 
+SIDEBAR_PAGE = "_Sidebar.md"
+# Hint of ``path.reserved`` when the generated sidebar owns the page name.
+SIDEBAR_RESERVED_HINT = "use another path or disable generate_sidebar"
 _MARKDOWN_SUFFIX = ".md"
 _FOREIGN_MARKDOWN_SUFFIXES = frozenset({".markdown", ".mdx", ".txt"})
 _RESERVED_SEGMENT = ".git"
@@ -134,16 +137,23 @@ def _invalid_name_error(summary: str, *, path: str, hint: str) -> GithubWikiErro
     return GithubWikiError("path.invalid_name", summary, context={"path": path}, hint=hint)
 
 
-def validate_page_ref(ref: DocumentRef) -> str:
+def validate_page_ref(ref: DocumentRef, *, reserve_sidebar: bool = False) -> str:
     """Return the root-level ``.md`` page name of ``ref`` or raise a coded error.
 
     Checks run in a fixed order and the first failure wins: reference kind
     (``ref.unsupported_kind``), presence of a path (``ref.missing_path``), a
-    ``.git`` component (``path.reserved``), any path separator
+    ``.git`` component (``path.reserved``), the generated sidebar's name when
+    ``reserve_sidebar`` is set (``path.reserved``), any path separator
     (``path.nested_not_supported``), a blank stem before ``.md``
     (``path.invalid_name``), an unsafe name (``path.invalid_name``) and the
     ``.md`` suffix, case-insensitive (``path.not_markdown``). The returned name
     is the path unchanged.
+
+    ``reserve_sidebar`` is off by default, so every caller keeps treating
+    ``_Sidebar.md`` as an ordinary page; a caller that generates the sidebar sets
+    it to keep plugins from writing (and spoofing) the managed file. The name is
+    compared case-insensitively, since a case-insensitive file system would
+    alias ``_sidebar.md`` to it.
 
     Code choices: ``ref.missing_path`` is only for a reference that carries no
     path at all (absent or blank). A name that exists but cannot be used (a
@@ -171,6 +181,13 @@ def validate_page_ref(ref: DocumentRef) -> str:
             "path.reserved",
             "The path contains a reserved '.git' component",
             context={"path": path},
+        )
+    if reserve_sidebar and path.casefold() == SIDEBAR_PAGE.casefold():
+        raise GithubWikiError(
+            "path.reserved",
+            f"The page name '{SIDEBAR_PAGE}' is reserved for the generated sidebar",
+            context={"path": path},
+            hint=SIDEBAR_RESERVED_HINT,
         )
     if len(segments) > 1:
         raise _nested_error(path)

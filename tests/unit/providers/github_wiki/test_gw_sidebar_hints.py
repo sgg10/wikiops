@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from wikiops.providers.github_wiki.errors import CODES
 from wikiops.providers.github_wiki.sidebar import (
     UNSET,
     HintPatch,
@@ -22,6 +23,7 @@ from wikiops.providers.github_wiki.sidebar import (
     collect,
     merge,
     page_name,
+    render_hint_warning,
     validate_hint,
 )
 
@@ -733,3 +735,108 @@ def test_unset_is_a_distinct_sentinel_that_names_itself():
     assert repr(UNSET) == "UNSET"
     assert UNSET is not None
     assert HintPatch().group is UNSET
+
+
+# -- render_hint_warning ------------------------------------------------------
+
+ORDER_REJECTION = RejectedHint(
+    operation_id="op-1", page="Install", problem=HintProblem("order", ORDER_SHAPE)
+)
+
+
+def rejection_of(page: str, metadata: dict[str, Any], operation_id: str = "op") -> RejectedHint:
+    sources = [HintSource(operation_id, f"{page}.md", metadata)]
+    rejected = collect(sources)[1]
+    assert len(rejected) == 1
+    return rejected[0]
+
+
+def test_render_hint_warning_exact_message_for_an_order_problem():
+    assert render_hint_warning(ORDER_REJECTION) == (
+        "[github_wiki:sidebar.invalid_hint] Sidebar hint ignored: 'order' is invalid, "
+        f"expected {ORDER_SHAPE}. op='op-1' page='Install' field='order'. "
+        f"Hint: {CODES['sidebar.invalid_hint'].default_hint}."
+    )
+
+
+@pytest.mark.parametrize(
+    ("rejected", "field", "expected"),
+    [
+        (ORDER_REJECTION, "order", ORDER_SHAPE),
+        (
+            RejectedHint("op-2", "Setup", HintProblem("group", TEXT_SHAPE)),
+            "group",
+            TEXT_SHAPE,
+        ),
+        (
+            RejectedHint("op-3", "Setup", HintProblem("weight", "only group, order and label are allowed")),
+            "weight",
+            "only group, order and label are allowed",
+        ),
+    ],
+    ids=["order", "group", "unknown-key"],
+)
+def test_render_hint_warning_names_the_operation_page_field_and_expected_shape(
+    rejected, field, expected
+):
+    message = render_hint_warning(rejected)
+
+    assert message.startswith("[github_wiki:sidebar.invalid_hint] Sidebar hint ignored: ")
+    assert f"'{field}'" in message
+    assert expected in message
+    assert f"op='{rejected.operation_id}'" in message
+    assert f"page='{rejected.page}'" in message
+    assert f"field='{field}'" in message
+
+
+def test_render_hint_warning_for_a_wrong_order_type_names_the_page_order_and_integer():
+    message = render_hint_warning(rejection_of("Install", hint({"group": "Guides", "order": "ten"})))
+
+    assert "page='Install'" in message
+    assert "field='order'" in message
+    assert "integer" in message
+
+
+def test_render_hint_warning_for_a_typo_lists_sidebar_as_the_valid_key():
+    message = render_hint_warning(rejection_of("Install", {"github_wiki": {"sidbar": {}}}))
+
+    assert "field='github_wiki.sidbar'" in message
+    assert "'sidebar'" in message
+
+
+def test_render_hint_warning_for_an_excluded_page_names_the_page():
+    message = render_hint_warning(rejection_of("_Footer", hint({"group": "X"})))
+
+    assert "page='_Footer'" in message
+    assert "does not start with '_'" in message
+
+
+def test_render_hint_warning_context_carries_op_page_and_field_in_that_order():
+    message = render_hint_warning(ORDER_REJECTION)
+
+    assert message.index("op='op-1'") < message.index("page='Install'") < message.index("field='order'")
+
+
+def test_render_hint_warning_stays_one_escaped_line_for_hostile_text():
+    hostile = RejectedHint(
+        operation_id="a\nb\x1b[31m",
+        page="x\ry\u202e",
+        problem=HintProblem("w\nz", "an\nint"),
+    )
+
+    message = render_hint_warning(hostile)
+
+    assert "\n" not in message and "\r" not in message and "\x1b" not in message
+    assert "\u202e" not in message
+    assert "a | b" in message
+    assert r"\x1b[31m" in message
+    assert r"\u202e" in message
+    assert message.count("Hint:") == 1
+
+
+def test_render_hint_warning_renders_a_bounded_unknown_key_echo_unchanged():
+    long_key = "k" * 200
+    message = render_hint_warning(rejection_of("P", hint({long_key: 1})))
+
+    assert "k" * 80 + "..." in message
+    assert "k" * 81 not in message

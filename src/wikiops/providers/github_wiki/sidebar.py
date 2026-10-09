@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 from urllib.parse import quote
 
+from wikiops.providers.github_wiki.errors import render_message
 from wikiops.providers.github_wiki.layout import guard_link
 from wikiops.providers.github_wiki.text import INVISIBLE_CHARACTERS, escape_unsafe_characters
 
@@ -280,6 +281,21 @@ def collect(
         else:
             patches.append((stem, outcome))
     return tuple(patches), tuple(rejected)
+
+
+def render_hint_warning(rejected: RejectedHint) -> str:
+    """Render the ``sidebar.invalid_hint`` warning of one ignored hint, on a single line.
+
+    It names the operation, the page, the offending field and the shape that field
+    expects, so the plugin author can fix the hint. The text is folded to one line and
+    stripped of control characters by :func:`render_message`.
+    """
+    problem = rejected.problem
+    return render_message(
+        "sidebar.invalid_hint",
+        f"Sidebar hint ignored: '{problem.field}' is invalid, expected {problem.expected}",
+        context={"op": rejected.operation_id, "page": rejected.page, "field": problem.field},
+    )
 
 
 def merge(

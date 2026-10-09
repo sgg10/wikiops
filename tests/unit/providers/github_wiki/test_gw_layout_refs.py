@@ -13,7 +13,11 @@ from wikiops_sdk.domain import DocumentRef, RefKind
 
 from wikiops.core.exceptions import ConfigurationError
 from wikiops.providers.github_wiki.errors import GithubWikiError
-from wikiops.providers.github_wiki.layout import derive_root_ref, validate_page_ref
+from wikiops.providers.github_wiki.layout import (
+    SIDEBAR_PAGE,
+    derive_root_ref,
+    validate_page_ref,
+)
 
 MESSAGE_SHAPE = re.compile(r"^\[github_wiki:[a-z_]+\.[a-z_]+\] .+ Hint: .+\.$")
 
@@ -23,9 +27,9 @@ def path_ref(path: str | None, *, kind: RefKind = RefKind.PATH) -> DocumentRef:
     return DocumentRef(provider="wiki", kind=kind, locator=locator)
 
 
-def failure(ref: DocumentRef) -> GithubWikiError:
+def failure(ref: DocumentRef, **options: bool) -> GithubWikiError:
     with pytest.raises(GithubWikiError) as caught:
-        validate_page_ref(ref)
+        validate_page_ref(ref, **options)
     return caught.value
 
 
@@ -52,8 +56,80 @@ def test_flat_markdown_page_is_accepted_and_returned_unchanged(path: str) -> Non
     assert validate_page_ref(path_ref(path)) == path
 
 
-def test_sidebar_page_is_an_ordinary_page_in_this_change() -> None:
+def test_sidebar_page_is_an_ordinary_page_by_default() -> None:
     assert validate_page_ref(path_ref("_Sidebar.md")) == "_Sidebar.md"
+    assert validate_page_ref(path_ref("_Sidebar.md"), reserve_sidebar=False) == "_Sidebar.md"
+
+
+def test_the_sidebar_page_constant_is_the_generated_file_name() -> None:
+    assert SIDEBAR_PAGE == "_Sidebar.md"
+
+
+# -- path.reserved: the generated sidebar page (opt-in) -----------------------
+
+
+@pytest.mark.parametrize(
+    "path", ["_Sidebar.md", "_sidebar.md", "_SIDEBAR.MD", "_Sidebar.Md", "_sIdEbAr.mD"]
+)
+def test_sidebar_page_is_reserved_when_requested_in_any_letter_case(path: str) -> None:
+    error = failure(path_ref(path), reserve_sidebar=True)
+
+    assert error.code == "path.reserved"
+    assert error.context["path"] == path
+    assert "generate_sidebar" in error.hint
+    assert error.hint == "use another path or disable generate_sidebar"
+    assert "'_Sidebar.md' is reserved for the generated sidebar" in str(error)
+    assert MESSAGE_SHAPE.match(str(error))
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "_Footer.md",
+        "Sidebar.md",
+        "x_Sidebar.md",
+        "_Sidebar.md.md",
+        "_Sidebar-2.md",
+        "Home.md",
+    ],
+)
+def test_only_the_exact_sidebar_name_is_reserved(path: str) -> None:
+    assert validate_page_ref(path_ref(path), reserve_sidebar=True) == path
+
+
+def test_git_component_is_reserved_with_its_own_hint_whatever_the_flag() -> None:
+    plain = failure(path_ref(".git/config"))
+    flagged = failure(path_ref(".git/config"), reserve_sidebar=True)
+
+    assert flagged.code == plain.code == "path.reserved"
+    assert flagged.hint == plain.hint
+    assert "generate_sidebar" not in flagged.hint
+    assert str(flagged) == str(plain)
+
+
+def test_a_git_component_wins_over_the_sidebar_name() -> None:
+    error = failure(path_ref(".git/_Sidebar.md"), reserve_sidebar=True)
+
+    assert "generate_sidebar" not in error.hint
+    assert error.context["path"] == ".git/_Sidebar.md"
+
+
+def test_a_nested_sidebar_path_is_still_a_nested_error() -> None:
+    assert failure(path_ref("a/_Sidebar.md"), reserve_sidebar=True).code == (
+        "path.nested_not_supported"
+    )
+
+
+def test_the_other_ref_checks_still_run_first_when_the_sidebar_is_reserved() -> None:
+    assert failure(path_ref("_Sidebar.md", kind=RefKind.ID), reserve_sidebar=True).code == (
+        "ref.unsupported_kind"
+    )
+    assert failure(path_ref("  "), reserve_sidebar=True).code == "ref.missing_path"
+
+
+def test_reserve_sidebar_is_keyword_only() -> None:
+    with pytest.raises(TypeError):
+        validate_page_ref(path_ref("Home.md"), True)  # type: ignore[misc]
 
 
 # -- ref.unsupported_kind / ref.missing_path ---------------------------------

@@ -125,6 +125,16 @@ Match the code with `^\[(?P<ns>[a-z_]+):(?P<code>[a-z_]+(\.[a-z_]+)*)\]`, then r
 | `push.rejected` | The remote advanced after the sync. The local commit is kept. Tell the user to reconcile in the workdir; the next run reports `sync.diverged` until they do. |
 | `push.failed` | The push failed for another reason. Read the redacted output; the local commit is kept. |
 
+### Sidebar warnings
+
+Warnings never fail a page operation: they are appended to an apply result message, not raised.
+
+| Code | How to react |
+| --- | --- |
+| `sidebar.unmanaged_exists` | Warning: `_Sidebar.md` exists without the managed marker and was left untouched. Ask the user whether wikiops should manage it (add `<!-- wikiops:managed sidebar -->` as its first line) or whether to set `generate_sidebar: false`. |
+| `sidebar.invalid_hint` | Warning: a sidebar placement hint was ignored as a whole. Use `metadata.github_wiki.sidebar = {group?: str<=80, order?: int in -1000000..1000000, label?: str<=80}`. |
+| `sidebar.write_failed` | Warning: `_Sidebar.md` could not be generated; the pages are not affected. Read the redacted cause in the message, fix it, and re-run apply. |
+
 ## After apply
 
 1. Inspect `=== APPLY RESULT ===`; any `FAILED` entry means the run failed.

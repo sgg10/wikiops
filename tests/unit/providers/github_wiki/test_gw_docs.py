@@ -50,12 +50,27 @@ def test_the_reference_code_table_lists_exactly_the_closed_vocabulary() -> None:
 
     assert documented  # the table was found and parsed
     assert documented == set(CODES)
+    assert len(documented) == 51
 
 
 def test_the_skill_reaction_tables_cover_exactly_the_closed_vocabulary() -> None:
     documented = table_codes(section(SKILL_REFERENCE.read_text(encoding="utf-8"), "## Reading a failure"))
 
     assert documented == set(CODES)
+    assert len(documented) == 51
+
+
+@pytest.mark.parametrize(
+    "code", ["sidebar.unmanaged_exists", "sidebar.invalid_hint", "sidebar.write_failed"]
+)
+def test_the_sidebar_warning_codes_are_documented_as_warnings_in_both_tables(code: str) -> None:
+    reference = section(REFERENCE.read_text(encoding="utf-8"), "## Error Codes")
+    skill = section(SKILL_REFERENCE.read_text(encoding="utf-8"), "## Reading a failure")
+
+    reference_row = next(line for line in reference.splitlines() if f"| `{code}` |" in line)
+    skill_row = next(line for line in skill.splitlines() if f"| `{code}` |" in line)
+
+    assert "Warning" in reference_row and "Warning" in skill_row
 
 
 @pytest.mark.parametrize("code", sorted(CODES))

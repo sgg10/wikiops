@@ -247,7 +247,7 @@ Context entries (`workdir`, `path`, `sha`, ...) appear only when they apply, and
 ^\[(?P<ns>[a-z_]+):(?P<code>[a-z_]+(\.[a-z_]+)*)\]
 ```
 
-Failures during apply appear as `FAILED` entries in `=== APPLY RESULT ===`; the CLI then exits with code `1`. `sync.stale_plan` is a warning (kind `W`) appended to a plan note; every other code is an error.
+Failures during apply appear as `FAILED` entries in `=== APPLY RESULT ===`; the CLI then exits with code `1`. `sync.stale_plan` is a warning (kind `W`) appended to a plan note, and the three `sidebar.*` codes are warnings (kind `W`) appended to an apply result message; warnings never fail an operation, and every other code is an error.
 
 | Code | Meaning | Fix |
 | --- | --- | --- |
@@ -299,6 +299,9 @@ Failures during apply appear as `FAILED` entries in `=== APPLY RESULT ===`; the 
 | `commit.failed` | `git add` or `git commit` failed (for example a hook), or a written path is ignored by git | Inspect the workdir; the paths stay pending |
 | `push.rejected` | The remote advanced since the sync | Reconcile in the workdir, then re-run |
 | `push.failed` | The push failed for another reason | Inspect the push output and the local commit |
+| `sidebar.unmanaged_exists` | Warning: `_Sidebar.md` exists without the managed marker, so it was left untouched | Add `<!-- wikiops:managed sidebar -->` as its first line to let wikiops manage it, or set `generate_sidebar: false` |
+| `sidebar.invalid_hint` | Warning: a sidebar placement hint was ignored as a whole | Use `metadata.github_wiki.sidebar = {group?: str<=80, order?: int in -1000000..1000000, label?: str<=80}` |
+| `sidebar.write_failed` | Warning: `_Sidebar.md` could not be generated; page operations are not affected | Fix the cause named in the message and re-run apply |
 
 ## Current Implementation Boundaries
 
