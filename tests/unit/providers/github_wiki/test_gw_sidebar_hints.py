@@ -306,6 +306,8 @@ def test_validate_hint_text_boundary_set_is_exactly_what_splitlines_splits_on(fi
     # a character is rejected inside a text exactly when it breaks a line.
     wrong = []
     for code in range(0x10000):
+        if 0xD800 <= code <= 0xDFFF:  # lone surrogates are rejected for another reason
+            continue
         text = f"a{chr(code)}b"
         rejected = isinstance(validate_hint(hint({field: text})), HintProblem)
         if rejected != (len(text.splitlines()) > 1):
@@ -313,6 +315,22 @@ def test_validate_hint_text_boundary_set_is_exactly_what_splitlines_splits_on(fi
 
     assert wrong == []
     assert len("a\x1cb".splitlines()) == 2
+
+
+@pytest.mark.parametrize("field", ["group", "label"])
+@pytest.mark.parametrize("value", ["\ud800", "a\udfffb", "\ud83d", "x\udc00"])
+def test_validate_hint_text_rejects_lone_surrogates_that_no_file_can_hold(field, value):
+    assert problem_of(hint({field: value})) == HintProblem(
+        field=field, expected=TEXT_SHAPE
+    )
+
+
+@pytest.mark.parametrize("field", ["group", "label"])
+def test_validate_hint_text_accepts_astral_characters_and_counts_them_once(field):
+    emoji = "\U0001f600"
+
+    assert patch_of(hint({field: emoji * 80})) == HintPatch(**{field: emoji * 80})
+    assert isinstance(validate_hint(hint({field: emoji * 81})), HintProblem)
 
 
 @pytest.mark.parametrize("field", ["group", "label"])

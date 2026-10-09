@@ -13,6 +13,10 @@ that carries the page placement so a later apply can recover it. Labels and grou
 are escaped for display and for the record, so a hint can neither inject markup nor
 forge or break out of a record.
 
+:func:`parse` reads those records back from a previous managed file. It is bounded (1 MiB)
+and linear, never trusts an unmarked file, and skips any entry it cannot decode, so a
+hand-edited or hostile sidebar only ever falls back to default placement.
+
 Pure functions only (no filesystem, process, network or backend access). No operation or
 document type from the SDK is used here, so the callers extract the metadata and hand it
 over as a :class:`HintSource`.
@@ -33,6 +37,8 @@ from wikiops.providers.github_wiki.text import escape_unsafe_characters
 
 MARKER = "<!-- wikiops:managed sidebar -->"
 MAX_TEXT = 80
+# A previous sidebar larger than this (utf-8 bytes) is not parsed: placements default.
+MAX_PARSE_BYTES = 1024 * 1024
 
 _SIDEBAR_KEY = "sidebar"
 _HINT_KEYS = frozenset({"group", "label", "order"})
@@ -52,7 +58,10 @@ _RECORD_SUFFIX = " -->"
 _RECORD_ESCAPES = {ord("-"): "\\u002d", ord("<"): "\\u003c", ord(">"): "\\u003e"}
 _MARKDOWN_ESCAPES = {ord(char): f"\\{char}" for char in string.punctuation}
 # Every character ``str.splitlines`` treats as a line boundary.
-_LINE_BOUNDARY = re.compile(r"[\n\r\v\f\x1c\x1d\x1e\x85  ]")
+_LINE_BOUNDARY = re.compile(r"[\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029]")
+# Lone surrogates cannot be encoded as utf-8, so no file could hold them.
+_SURROGATE = re.compile(r"[\ud800-\udfff]")
+_ENTRY_START = "- "
 
 
 class _Unset:
@@ -132,6 +141,7 @@ def _check_text(field: str, value: Any) -> HintProblem | None:
         and bool(value.strip())
         and len(value) <= MAX_TEXT
         and _LINE_BOUNDARY.search(value) is None
+        and _SURROGATE.search(value) is None
     )
     return None if valid else HintProblem(field, _TEXT_SHAPE)
 
@@ -389,3 +399,60 @@ def render(pages: Iterable[str], placements: Mapping[str, Placement]) -> str:
             lines.extend((f"**{_md(group)}**", ""))
         lines.extend(_entry_line(stem, placements.get(stem, Placement())) for stem in stems)
     return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# Parsing
+# ---------------------------------------------------------------------------
+
+
+def _decode_entry(line: str) -> tuple[str, Placement] | None:
+    """Recover ``(page, placement)`` from one entry line, or ``None`` when it is not one.
+
+    An entry starts with ``- `` and ends with the record suffix; the record is whatever
+    sits between the LAST record prefix and that suffix, so a prefix-like text inside an
+    earlier part of the line can never be taken for the record. Plain string operations
+    only, so the cost is linear in the line length. The markdown text and link target are
+    ignored: the record is the only source of the placement, and it must satisfy the very
+    same validators as a plugin hint.
+    """
+    if not (line.startswith(_ENTRY_START) and line.endswith(_RECORD_SUFFIX)):
+        return None
+    start = line.rfind(_RECORD_PREFIX)
+    end = len(line) - len(_RECORD_SUFFIX)
+    if start < len(_ENTRY_START):
+        return None
+    try:
+        record = json.loads(line[start + len(_RECORD_PREFIX) : end])
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(record, dict):
+        return None
+    page = record.get("page")
+    if not isinstance(page, str) or not page or _SURROGATE.search(page):
+        return None
+    patch = _validate_sidebar({key: value for key, value in record.items() if key != "page"})
+    if isinstance(patch, HintProblem):
+        return None
+    return page, apply_patch(Placement(), patch)
+
+
+def parse(text: str) -> dict[str, Placement]:
+    """Recover the placement of each page from a previous managed sidebar.
+
+    Only a managed file (see :func:`classify`) of at most :data:`MAX_PARSE_BYTES` utf-8
+    bytes is read; anything else yields ``{}`` and every page falls back to its default.
+    Lines are separated by ``\\n`` (one trailing ``\\r`` is dropped, for CRLF checkouts).
+    An entry that cannot be decoded (hand-edited, malformed or invalid) is skipped, never
+    an error, and the first valid entry of a page wins.
+    """
+    if classify(text) == "unmanaged":
+        return {}
+    if len(text.encode("utf-8", "surrogatepass")) > MAX_PARSE_BYTES:
+        return {}
+    placements: dict[str, Placement] = {}
+    for line in text.split("\n"):
+        entry = _decode_entry(line.removesuffix("\r"))
+        if entry is not None:
+            placements.setdefault(*entry)
+    return placements
