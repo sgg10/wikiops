@@ -31,6 +31,8 @@ from wikiops.providers.github_wiki.sidebar import (
 PREFIX = " <!-- wikiops:entry "
 SUFFIX = " -->"
 SEED_RANGE = range(200)
+# JSON escape of a zero-width space (spelled without a literal escape in the source).
+ZW_ESCAPE = chr(92) + "u200b"
 LOOSE_SECONDS = 2.0
 
 
@@ -332,6 +334,13 @@ def test_parse_unknown_keys_reject_the_whole_entry(payload):
         '{"page":"A","group":"a\\u001cb"}',
         '{"page":"A","label":"\\ud800"}',
         '{"page":"A","group":"G","order":"bad"}',
+        '{"page":"A","order":1000001}',
+        '{"page":"A","order":-1000001}',
+        '{"page":"A","order":' + "9" * 30 + "}",
+        '{"page":"A","order":1' + "0" * 5000 + "}",
+        '{"page":"A","label":"' + ZW_ESCAPE + '"}',
+        '{"page":"A","group":"' + ZW_ESCAPE * 3 + '"}',
+        '{"page":"A","group":" ' + ZW_ESCAPE + ' "}',
     ],
 )
 def test_parse_invalid_values_are_rejected_with_the_hint_validators(payload):
@@ -345,10 +354,12 @@ def test_parse_invalid_values_are_rejected_with_the_hint_validators(payload):
         ('{"page":"A","label":"' + "l" * 80 + '"}', {"A": p(label="l" * 80)}),
         ('{"page":"A","order":0}', {"A": p(order=0)}),
         ('{"page":"A","order":-7}', {"A": p(order=-7)}),
-        ('{"page":"A","order":' + "9" * 30 + "}", {"A": p(order=int("9" * 30))}),
+        ('{"page":"A","order":1000000}', {"A": p(order=1_000_000)}),
+        ('{"page":"A","order":-1000000}', {"A": p(order=-1_000_000)}),
         ('{"page":"A","group":null,"order":null,"label":null}', {"A": p()}),
         ('{"page":"A"}', {"A": p()}),
-        ('{"page":"A","group":"  Padded  "}', {"A": p(group="  Padded  ")}),
+        ('{"page":"A","group":"  Padded  "}', {"A": p(group="Padded")}),
+        ('{"page":"A","label":"  Padded  "}', {"A": p(label="  Padded  ")}),
         ('{"label":"L","order":3,"group":"G","page":"A"}', {"A": p("G", 3, "L")}),
     ],
 )
@@ -512,7 +523,8 @@ def test_parse_recovers_adversarial_group_and_label_exactly(text):
 
     parsed = parse(render(["Page"], placements))
 
-    assert parsed == placements
+    # The group is stored stripped; the label keeps its exact value.
+    assert parsed == {"Page": p(group=text.strip(), order=3, label=text)}
 
 
 @pytest.mark.parametrize("text", ADVERSARIAL)
@@ -522,7 +534,7 @@ def test_parse_adversarial_text_forges_no_other_entry(text):
     parsed = parse(render(["Page", "Other"], placements))
 
     assert set(parsed) == {"Page", "Other"}
-    assert parsed == placements
+    assert parsed == {"Page": p(group=text.strip(), label=text), "Other": p(order=1)}
 
 
 @pytest.mark.parametrize(
@@ -646,7 +658,7 @@ def random_scenario(seed: int) -> tuple[list[str], dict[str, Placement]]:
         if rng.random() < 0.7:
             placements[stem] = Placement(
                 group=rng.choice([None, *groups]),
-                order=rng.choice([None, rng.randint(-5, 5), rng.randint(-(10**12), 10**12)]),
+                order=rng.choice([None, rng.randint(-5, 5), rng.randint(-1_000_000, 1_000_000)]),
                 label=rng.choice([None, random_text(rng)]),
             )
     rng.shuffle(pages)
@@ -654,7 +666,13 @@ def random_scenario(seed: int) -> tuple[list[str], dict[str, Placement]]:
 
 
 def expected_for(pages: list[str], placements: dict[str, Placement]) -> dict[str, Placement]:
-    return {stem: placements.get(stem, Placement()) for stem in pages}
+    """The placements ``render`` keeps: a group is stored stripped, everything else as given."""
+    expected = {}
+    for stem in pages:
+        placement = placements.get(stem, Placement())
+        group = None if placement.group is None else placement.group.strip()
+        expected[stem] = Placement(group=group, order=placement.order, label=placement.label)
+    return expected
 
 
 @pytest.mark.parametrize("seed", SEED_RANGE)

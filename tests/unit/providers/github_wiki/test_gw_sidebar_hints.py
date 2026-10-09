@@ -26,7 +26,12 @@ from wikiops.providers.github_wiki.sidebar import (
 )
 
 TEXT_SHAPE = "a non-empty single-line string of at most 80 characters"
-ORDER_SHAPE = "an integer"
+ORDER_SHAPE = "an integer between -1000000 and 1000000"
+ZERO_WIDTH = chr(0x200B)
+BOM = chr(0xFEFF)
+BIDI_OVERRIDE = chr(0x202E)
+SOFT_HYPHEN = chr(0x00AD)
+NBSP = chr(0x00A0)
 
 
 def hint(sidebar: Any) -> dict[str, Any]:
@@ -347,14 +352,60 @@ def test_validate_hint_text_rejects_non_strings(field, value):
     )
 
 
-def test_validate_hint_text_keeps_the_exact_value_including_padding():
-    assert patch_of(hint({"group": "  Guides  "})).group == "  Guides  "
+@pytest.mark.parametrize("field", ["group", "label"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        ZERO_WIDTH,
+        ZERO_WIDTH * 5,
+        BOM,
+        BIDI_OVERRIDE,
+        SOFT_HYPHEN,
+        f" {ZERO_WIDTH} ",
+        f"{ZERO_WIDTH}{NBSP}{BOM}",
+    ],
+    ids=["zero-width", "zero-width-run", "bom", "bidi", "soft-hyphen", "padded", "mixed"],
+)
+def test_validate_hint_text_rejects_invisible_only_values(field, value):
+    assert problem_of(hint({field: value})) == HintProblem(
+        field=field, expected=TEXT_SHAPE
+    )
+
+
+@pytest.mark.parametrize("field", ["group", "label"])
+@pytest.mark.parametrize("value", [f"a{ZERO_WIDTH}", f"{ZERO_WIDTH}a", f"{BIDI_OVERRIDE}x{BOM}"])
+def test_validate_hint_text_accepts_invisible_characters_next_to_visible_text(field, value):
+    assert isinstance(validate_hint(hint({field: value})), HintPatch)
+
+
+def test_validate_hint_label_keeps_the_exact_value_including_padding():
+    assert patch_of(hint({"label": "  Install  "})).label == "  Install  "
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("  Guides  ", "Guides"), ("Guides", "Guides"), ("\tGuides ", "Guides"), (f"{NBSP}G{NBSP}", "G")],
+)
+def test_validate_hint_group_is_normalized_by_stripping(value, expected):
+    assert patch_of(hint({"group": value})).group == expected
+
+
+def test_padded_and_unpadded_group_spellings_merge_into_one_group():
+    patches, rejected = collect(
+        [
+            HintSource("op1", "A.md", hint({"group": " Guides "})),
+            HintSource("op2", "B.md", hint({"group": "Guides"})),
+        ]
+    )
+
+    assert rejected == ()
+    assert merge({}, patches) == {"A": Placement(group="Guides"), "B": Placement(group="Guides")}
 
 
 # -- validate_hint: order -----------------------------------------------------
 
 
-@pytest.mark.parametrize("value", [0, 1, -7, 10**12])
+@pytest.mark.parametrize("value", [0, 1, -7, 1_000_000, -1_000_000])
 def test_validate_hint_order_accepts_integers(value):
     assert patch_of(hint({"order": value})).order == value
 
@@ -364,6 +415,24 @@ def test_validate_hint_order_rejects_booleans_and_non_integers(value):
     assert problem_of(hint({"order": value})) == HintProblem(
         field="order", expected=ORDER_SHAPE
     )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [1_000_001, -1_000_001, 10**12, 10**5000, -(10**5000)],
+    ids=["over", "under", "trillion", "huge", "huge-negative"],
+)
+def test_validate_hint_order_rejects_integers_outside_the_sane_range(value):
+    assert problem_of(hint({"order": value})) == HintProblem(
+        field="order", expected=ORDER_SHAPE
+    )
+
+
+def test_validate_hint_order_huge_integer_is_rejected_without_converting_it_to_text():
+    # A >4300-digit int makes str()/json.dumps raise; the bound must reject it first.
+    outcome = validate_hint(hint({"order": 10**5000, "group": "G"}))
+
+    assert outcome == HintProblem(field="order", expected=ORDER_SHAPE)
 
 
 def test_validate_hint_order_none_is_a_clear():

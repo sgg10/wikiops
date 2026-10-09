@@ -33,10 +33,13 @@ from typing import Any, Literal
 from urllib.parse import quote
 
 from wikiops.providers.github_wiki.layout import guard_link
-from wikiops.providers.github_wiki.text import escape_unsafe_characters
+from wikiops.providers.github_wiki.text import INVISIBLE_CHARACTERS, escape_unsafe_characters
 
 MARKER = "<!-- wikiops:managed sidebar -->"
 MAX_TEXT = 80
+# ``order`` only ranks pages, so a sane range is plenty; it also keeps the integer small
+# enough to serialize (CPython refuses to convert integers beyond 4300 digits to text).
+MAX_ORDER = 1_000_000
 # A previous sidebar larger than this (utf-8 bytes) is not parsed: placements default.
 MAX_PARSE_BYTES = 1024 * 1024
 
@@ -45,7 +48,7 @@ _HINT_KEYS = frozenset({"group", "label", "order"})
 _MARKDOWN_SUFFIX = ".md"
 _EXCLUDED_PREFIX = "_"
 _TEXT_SHAPE = f"a non-empty single-line string of at most {MAX_TEXT} characters"
-_ORDER_SHAPE = "an integer"
+_ORDER_SHAPE = f"an integer between -{MAX_ORDER} and {MAX_ORDER}"
 # An unknown hint key is plugin-controlled, so it is bounded and escaped before it is
 # echoed into a problem (and from there into a warning message).
 _MAX_ECHO = 80
@@ -132,13 +135,22 @@ def page_name(file_name: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _is_blank(text: str) -> bool:
+    """Whether ``text`` shows nothing: only whitespace and invisible characters.
+
+    One definition for validation and rendering, so a value the hints accept can never
+    render as an empty link text or an empty group heading.
+    """
+    return not INVISIBLE_CHARACTERS.sub("", text).strip()
+
+
 def _check_text(field: str, value: Any) -> HintProblem | None:
     """Validate a ``group`` or ``label`` value (``None`` is a clear, hence valid)."""
     if value is None:
         return None
     valid = (
         isinstance(value, str)
-        and bool(value.strip())
+        and not _is_blank(value)
         and len(value) <= MAX_TEXT
         and _LINE_BOUNDARY.search(value) is None
         and _SURROGATE.search(value) is None
@@ -147,10 +159,11 @@ def _check_text(field: str, value: Any) -> HintProblem | None:
 
 
 def _check_order(value: Any) -> HintProblem | None:
-    """Validate an ``order`` value: an integer, never a boolean (``None`` is a clear)."""
-    if value is None or (isinstance(value, int) and not isinstance(value, bool)):
+    """Validate an ``order`` value: a bounded integer, never a boolean (``None`` is a clear)."""
+    if value is None:
         return None
-    return HintProblem("order", _ORDER_SHAPE)
+    valid = isinstance(value, int) and not isinstance(value, bool) and abs(value) <= MAX_ORDER
+    return None if valid else HintProblem("order", _ORDER_SHAPE)
 
 
 def _visible(char: str) -> str:
@@ -197,8 +210,9 @@ def _validate_sidebar(sidebar: Any) -> HintPatch | HintProblem:
             return problem
     if "order" in sidebar and (problem := _check_order(sidebar["order"])):
         return problem
+    group = sidebar.get("group", UNSET)
     return HintPatch(
-        group=sidebar.get("group", UNSET),
+        group=group.strip() if isinstance(group, str) else group,
         order=sidebar.get("order", UNSET),
         label=sidebar.get("label", UNSET),
     )
@@ -295,12 +309,39 @@ def classify(text: str) -> Literal["managed", "unmanaged"]:
 
 
 def display_label(page: str, placement: Placement) -> str:
-    """Return the link text of ``page``: its ``label`` hint, else the name with spaces."""
-    return page.replace("-", " ") if placement.label is None else placement.label
+    """Return the link text of ``page``: its ``label`` hint, else the name with spaces.
+
+    A blank label counts as no label, and a name that turns blank once its hyphens become
+    spaces (``-``) is shown as it is, so the link text is never empty.
+    """
+    if placement.label is not None and not _is_blank(placement.label):
+        return placement.label
+    spaced = page.replace("-", " ")
+    return page if _is_blank(spaced) else spaced
+
+
+def _group_name(placement: Placement) -> str | None:
+    """Return the group a placement belongs to: stripped, ``None`` when blank or unset.
+
+    Padded and unpadded spellings are one group, and a blank group is no group.
+    """
+    if placement.group is None or _is_blank(placement.group):
+        return None
+    return placement.group.strip()
+
+
+def _normalized(placement: Placement) -> Placement:
+    """Return ``placement`` as it is ranked, shown and recorded: no blank label or group."""
+    label = placement.label
+    return Placement(
+        group=_group_name(placement),
+        order=placement.order,
+        label=None if label is None or _is_blank(label) else label,
+    )
 
 
 def _entry_key(stem: str, placement: Placement) -> tuple[object, ...]:
-    """Sort key of a page inside one list: pinned Home, then ordered, then the rest."""
+    """Sort key of a page (its normalized placement) in one list: Home pin, ordered, rest."""
     label = display_label(stem, placement).casefold()
     if stem == _HOME and placement.group is None and placement.order is None:
         return (0,)
@@ -324,14 +365,16 @@ def order(
     Inside a list, pages with an ``order`` come first (ascending, ties by display label
     then name) and the rest follow alphabetically; ``Home`` without a group or an order
     stays first. Groups are ranked by the lowest ``order`` of their pages (a group of
-    unordered pages ranks last), ties by group name. Empty lists are omitted.
+    unordered pages ranks last), ties by group name. Empty lists are omitted. A group is
+    named without its surrounding whitespace, so padded and unpadded spellings are one
+    group, and a blank group or label counts as unset.
     """
+    def placement_of(stem: str) -> Placement:
+        return _normalized(placements.get(stem, Placement()))
+
     lists: dict[str | None, list[str]] = {}
     for stem in dict.fromkeys(pages):
-        lists.setdefault(placements.get(stem, Placement()).group, []).append(stem)
-
-    def placement_of(stem: str) -> Placement:
-        return placements.get(stem, Placement())
+        lists.setdefault(placement_of(stem).group, []).append(stem)
 
     def arranged(group: str | None) -> tuple[str | None, tuple[str, ...]]:
         stems = sorted(lists[group], key=lambda stem: _entry_key(stem, placement_of(stem)))
@@ -381,6 +424,7 @@ def _record(stem: str, placement: Placement) -> str:
 
 
 def _entry_line(stem: str, placement: Placement) -> str:
+    placement = _normalized(placement)
     target = guard_link(quote(stem, safe=""))
     label = _md(display_label(stem, placement))
     return f"- [{label}]({target}){_RECORD_PREFIX}{_record(stem, placement)}{_RECORD_SUFFIX}"

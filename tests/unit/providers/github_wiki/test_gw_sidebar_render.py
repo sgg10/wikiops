@@ -38,6 +38,9 @@ LESS = chr(92) + "u003c"
 GREATER = chr(92) + "u003e"
 E_ACUTE = chr(92) + "u00e9"
 E_DIAERESIS = chr(92) + "u00eb"
+ZERO_WIDTH = chr(0x200B)
+BOM = chr(0xFEFF)
+NBSP = chr(0x00A0)
 
 
 def p(**keys: object) -> Placement:
@@ -165,6 +168,28 @@ def test_classify_marker_constant_is_the_documented_line():
 )
 def test_display_label_is_the_label_hint_or_the_page_with_spaces(page, placement, expected):
     assert display_label(page, placement) == expected
+
+
+BLANK_VALUES = ["", " ", "   ", "\t", NBSP, ZERO_WIDTH, ZERO_WIDTH * 4, BOM, f" {ZERO_WIDTH} "]
+BLANK_IDS = ["empty", "space", "spaces", "tab", "nbsp", "zero-width", "zero-width-run", "bom", "padded"]
+
+
+@pytest.mark.parametrize("label", BLANK_VALUES, ids=BLANK_IDS)
+def test_display_label_falls_back_to_the_page_when_the_label_is_blank(label):
+    assert display_label("Getting-Started", Placement(label=label)) == "Getting Started"
+
+
+@pytest.mark.parametrize(
+    ("page", "expected"),
+    [("-", "-"), ("--", "--"), (ZERO_WIDTH, ZERO_WIDTH), ("a-b", "a b")],
+    ids=["hyphen", "hyphens", "zero-width-page", "ordinary"],
+)
+def test_display_label_never_derives_a_blank_text_from_the_page(page, expected):
+    assert display_label(page, Placement()) == expected
+
+
+def test_display_label_keeps_a_label_with_visible_text_exactly():
+    assert display_label("P", Placement(label=f" a{ZERO_WIDTH} ")) == f" a{ZERO_WIDTH} "
 
 
 # -- order (SB6, SB7) ---------------------------------------------------------------
@@ -323,6 +348,40 @@ def test_order_groups_with_different_letter_case_are_different_groups():
     assert order(["x", "y"], placements) == (("G", ("y",)), ("g", ("x",)))
 
 
+@pytest.mark.parametrize("label", BLANK_VALUES, ids=BLANK_IDS)
+def test_order_sorts_a_blank_label_by_the_page_derived_label(label):
+    assert order(["a", "b"], {"b": p(label=label)}) == ((None, ("a", "b")),)
+    assert order(["b", "a"], {"a": p(label=label)}) == ((None, ("a", "b")),)
+
+
+@pytest.mark.parametrize("group", BLANK_VALUES, ids=BLANK_IDS)
+def test_order_treats_a_blank_group_as_ungrouped(group):
+    assert order(["x", "y"], {"x": p(group=group)}) == ((None, ("x", "y")),)
+
+
+@pytest.mark.parametrize("group", BLANK_VALUES, ids=BLANK_IDS)
+def test_order_blank_group_keeps_the_home_pin_and_a_blank_order_rank(group):
+    assert order(["Alpha", "Home"], {"Home": p(group=group)}) == ((None, ("Home", "Alpha")),)
+
+
+def test_order_padded_and_unpadded_groups_are_one_group_named_without_padding():
+    placements = {"x": p(group=" Guides "), "y": p(group="Guides"), "z": p(group="Guides ")}
+
+    assert order(["z", "y", "x"], placements) == (("Guides", ("x", "y", "z")),)
+
+
+def test_order_group_padding_does_not_change_the_group_rank():
+    placements = {"x": p(group=" B", order=1), "y": p(group="A", order=5)}
+
+    assert order(["x", "y"], placements) == (("B", ("x",)), ("A", ("y",)))
+
+
+def test_order_groups_that_only_differ_in_padding_do_not_split_the_minimum_order():
+    placements = {"x": p(group=" G", order=9), "y": p(group="G", order=2), "z": p(group="H", order=5)}
+
+    assert order(["x", "y", "z"], placements) == (("G", ("y", "x")), ("H", ("z",)))
+
+
 # -- render golden bytes (SB3, SB5, D7) ---------------------------------------------
 
 
@@ -470,6 +529,50 @@ def test_render_is_deterministic_for_any_input_order():
     first = render(["a", "b", "c"], placements)
     assert render(["c", "a", "b"], placements) == first
     assert render(["a", "b", "c"], placements) == first
+
+
+@pytest.mark.parametrize("label", BLANK_VALUES, ids=BLANK_IDS)
+def test_render_blank_label_shows_the_page_derived_text_and_records_no_label(label):
+    text = render(["Getting-Started"], {"Getting-Started": p(label=label)})
+
+    assert text == render(["Getting-Started"], {})
+    assert display_of(entry_lines(text)[0], "Getting-Started") == "Getting Started"
+    assert "label" not in record_of(entry_lines(text)[0])
+
+
+@pytest.mark.parametrize("group", BLANK_VALUES, ids=BLANK_IDS)
+def test_render_blank_group_is_ungrouped_without_a_heading_and_records_no_group(group):
+    text = render(["P", "Q"], {"P": p(group=group, order=3)})
+
+    assert text == render(["P", "Q"], {"P": p(order=3)})
+    assert "**" not in text
+    assert "group" not in text
+
+
+@pytest.mark.parametrize("page", ["-", "--", ZERO_WIDTH])
+def test_render_never_produces_an_empty_link_text(page):
+    line = entry_lines(render([page], {}))[0]
+
+    assert not line.startswith("- []")
+
+
+def test_render_padded_and_unpadded_groups_share_one_heading_and_one_recorded_name():
+    placements = {"x": p(group=" Guides "), "y": p(group="Guides")}
+
+    assert render(["x", "y"], placements) == listing(
+        MARKER,
+        "",
+        "**Guides**",
+        "",
+        entry("x", "x", '{"group":"Guides","page":"x"}'),
+        entry("y", "y", '{"group":"Guides","page":"y"}'),
+    )
+
+
+def test_render_group_padding_is_not_kept_in_the_record():
+    line = entry_lines(render(["P"], {"P": p(group="  Guides  ")}))[0]
+
+    assert json.loads(record_of(line))["group"] == "Guides"
 
 
 # -- display escaping (injection: label and group) ------------------------------------
