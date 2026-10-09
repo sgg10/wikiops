@@ -7,18 +7,31 @@ applies: a key that is absent keeps the previous value, a value overrides it and
 clears it. A hint that is invalid in any way is ignored as a whole, never partially
 applied, and never fails the page operation it rides on.
 
-Pure functions only (no filesystem, process, network or backend access). The module
-imports the standard library alone: no operation or document type from the SDK is used
-here, so the callers extract the metadata and hand it over as a :class:`HintSource`.
+The module also renders the managed file. A generated sidebar starts with :data:`MARKER`
+and lists one markdown link per page, each followed by an invisible HTML-comment record
+that carries the page placement so a later apply can recover it. Labels and group names
+are escaped for display and for the record, so a hint can neither inject markup nor
+forge or break out of a record.
+
+Pure functions only (no filesystem, process, network or backend access). No operation or
+document type from the SDK is used here, so the callers extract the metadata and hand it
+over as a :class:`HintSource`.
 """
 
 from __future__ import annotations
 
+import json
 import re
+import string
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
+from urllib.parse import quote
 
+from wikiops.providers.github_wiki.layout import guard_link
+from wikiops.providers.github_wiki.text import escape_unsafe_characters
+
+MARKER = "<!-- wikiops:managed sidebar -->"
 MAX_TEXT = 80
 
 _SIDEBAR_KEY = "sidebar"
@@ -27,6 +40,13 @@ _MARKDOWN_SUFFIX = ".md"
 _EXCLUDED_PREFIX = "_"
 _TEXT_SHAPE = f"a non-empty single-line string of at most {MAX_TEXT} characters"
 _ORDER_SHAPE = "an integer"
+_HOME = "Home"
+_RECORD_PREFIX = " <!-- wikiops:entry "
+_RECORD_SUFFIX = " -->"
+# JSON escapes for the characters that could end or open an HTML comment (``-->``,
+# ``--!>``, ``<!--``) once the record sits inside one.
+_RECORD_ESCAPES = {ord("-"): "\\u002d", ord("<"): "\\u003c", ord(">"): "\\u003e"}
+_MARKDOWN_ESCAPES = {ord(char): f"\\{char}" for char in string.punctuation}
 # Every character ``str.splitlines`` treats as a line boundary.
 _LINE_BOUNDARY = re.compile(r"[\n\r\v\f\x1c\x1d\x1e\x85  ]")
 
@@ -216,3 +236,126 @@ def merge(
     for stem, patch in patches:
         merged[stem] = apply_patch(merged.get(stem, Placement()), patch)
     return merged
+
+
+# ---------------------------------------------------------------------------
+# Ownership and ordering
+# ---------------------------------------------------------------------------
+
+
+def classify(text: str) -> Literal["managed", "unmanaged"]:
+    """Say whether ``text`` is a generated sidebar: its first line is exactly the marker.
+
+    The first line is the text before the first ``\\n``, minus one trailing ``\\r`` (a
+    CRLF checkout). A leading space, trailing text, a BOM or a second ``\\r`` make the
+    file unmanaged, and an unmanaged file is never parsed, written or staged.
+    """
+    first_line = text.partition("\n")[0].removesuffix("\r")
+    return "managed" if first_line == MARKER else "unmanaged"
+
+
+def display_label(page: str, placement: Placement) -> str:
+    """Return the link text of ``page``: its ``label`` hint, else the name with spaces."""
+    return page.replace("-", " ") if placement.label is None else placement.label
+
+
+def _entry_key(stem: str, placement: Placement) -> tuple[object, ...]:
+    """Sort key of a page inside one list: pinned Home, then ordered, then the rest."""
+    label = display_label(stem, placement).casefold()
+    if stem == _HOME and placement.group is None and placement.order is None:
+        return (0,)
+    if placement.order is not None:
+        return (1, placement.order, label, stem)
+    return (2, label, stem)
+
+
+def _group_key(group: str, members: Iterable[Placement]) -> tuple[object, ...]:
+    """Sort key of a group: its lowest page ``order`` (none ranks last), then its name."""
+    orders = [member.order for member in members if member.order is not None]
+    lowest = min(orders) if orders else None
+    return (lowest is None, lowest or 0, group.casefold(), group)
+
+
+def order(
+    pages: Iterable[str], placements: Mapping[str, Placement]
+) -> tuple[tuple[str | None, tuple[str, ...]], ...]:
+    """Arrange ``pages`` (stems) into the ungrouped list followed by each group, in order.
+
+    Inside a list, pages with an ``order`` come first (ascending, ties by display label
+    then name) and the rest follow alphabetically; ``Home`` without a group or an order
+    stays first. Groups are ranked by the lowest ``order`` of their pages (a group of
+    unordered pages ranks last), ties by group name. Empty lists are omitted.
+    """
+    lists: dict[str | None, list[str]] = {}
+    for stem in dict.fromkeys(pages):
+        lists.setdefault(placements.get(stem, Placement()).group, []).append(stem)
+
+    def placement_of(stem: str) -> Placement:
+        return placements.get(stem, Placement())
+
+    def arranged(group: str | None) -> tuple[str | None, tuple[str, ...]]:
+        stems = sorted(lists[group], key=lambda stem: _entry_key(stem, placement_of(stem)))
+        return group, tuple(stems)
+
+    groups = sorted(
+        (group for group in lists if group is not None),
+        key=lambda group: _group_key(group, map(placement_of, lists[group])),
+    )
+    return tuple(arranged(group) for group in ([None] if None in lists else []) + groups)
+
+
+# ---------------------------------------------------------------------------
+# Rendering
+# ---------------------------------------------------------------------------
+
+
+def _md(text: str) -> str:
+    """Return ``text`` safe to show as markdown: escape unsafe characters and punctuation.
+
+    Control and invisible characters become visible escapes, then every ASCII
+    punctuation character is backslash-escaped (CommonMark allows it for all of them),
+    which neutralizes links, ``[[wiki]]`` links, tables, emphasis, HTML and entities.
+    Only the display is stripped; the record keeps the exact value.
+    """
+    return escape_unsafe_characters(text.strip()).translate(_MARKDOWN_ESCAPES)
+
+
+def _json_string(value: str) -> str:
+    return json.dumps(value, ensure_ascii=True).translate(_RECORD_ESCAPES)
+
+
+def _record(stem: str, placement: Placement) -> str:
+    """Return the JSON record of one entry: sorted keys, ASCII only, comment-safe.
+
+    Inside string values ``-``, ``<`` and ``>`` become JSON escapes, so the record can
+    never hold ``--``, a comment opener or a closer; an integer ``order`` is left alone.
+    """
+    fields: dict[str, str] = {"page": _json_string(stem)}
+    if placement.group is not None:
+        fields["group"] = _json_string(placement.group)
+    if placement.label is not None:
+        fields["label"] = _json_string(placement.label)
+    if placement.order is not None:
+        fields["order"] = json.dumps(placement.order)
+    return "{" + ",".join(f'"{key}":{fields[key]}' for key in sorted(fields)) + "}"
+
+
+def _entry_line(stem: str, placement: Placement) -> str:
+    target = guard_link(quote(stem, safe=""))
+    label = _md(display_label(stem, placement))
+    return f"- [{label}]({target}){_RECORD_PREFIX}{_record(stem, placement)}{_RECORD_SUFFIX}"
+
+
+def render(pages: Iterable[str], placements: Mapping[str, Placement]) -> str:
+    """Render the managed sidebar for ``pages`` (stems) with their ``placements``.
+
+    Output is deterministic: the marker line, then the ungrouped list and one
+    ``**group**`` block per group, separated by blank lines, ending in one newline.
+    """
+    lines = [MARKER]
+    for group, stems in order(pages, placements):
+        lines.append("")
+        if group is not None:
+            lines.extend((f"**{_md(group)}**", ""))
+        lines.extend(_entry_line(stem, placements.get(stem, Placement())) for stem in stems)
+    return "\n".join(lines) + "\n"
