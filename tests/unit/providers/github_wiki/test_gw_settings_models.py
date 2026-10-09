@@ -44,6 +44,7 @@ def test_minimal_settings_apply_every_default() -> None:
     assert settings.commit.message == "docs(wiki): update via wikiops plugin {plugin_id}"
     assert settings.allow_auto_commit is True
     assert settings.allow_auto_push is False
+    assert settings.generate_sidebar is False
     assert settings.local_backend.type == "local_files"
     assert settings.git_timeout_seconds == 120
 
@@ -67,7 +68,7 @@ def test_default_instances_are_not_shared_between_settings() -> None:
     "overrides",
     [
         {"allow_autocommit": True},
-        {"generate_sidebar": True},
+        {"generate_sidebars": True},
         {"auth": {"mode": "ambient", "extra": 1}},
         {"auth": {"mode": "env", "variable": "T", "account": "x"}},
         {"commit": {"unknown": 1}},
@@ -75,7 +76,7 @@ def test_default_instances_are_not_shared_between_settings() -> None:
     ],
     ids=[
         "root-typo",
-        "generate-sidebar-not-shipped",
+        "generate-sidebar-typo",
         "auth-ambient",
         "auth-env",
         "commit",
@@ -89,6 +90,33 @@ def test_unknown_keys_are_rejected_at_every_nesting_level(
         build(**overrides)
 
     assert "extra_forbidden" in {error["type"] for error in caught.value.errors()}
+
+
+# -- generate_sidebar (GWP-D1) ---------------------------------------------
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_generate_sidebar_accepts_a_boolean(value: bool) -> None:
+    assert build(generate_sidebar=value).generate_sidebar is value
+
+
+@pytest.mark.parametrize("value", [{"a": 1}, [True], 2, "maybe", None, 1.5])
+def test_generate_sidebar_rejects_a_value_that_is_not_a_boolean(value: Any) -> None:
+    with pytest.raises(ValidationError) as caught:
+        build(generate_sidebar=value)
+
+    assert [error["loc"] for error in caught.value.errors()] == [("generate_sidebar",)]
+
+
+@pytest.mark.parametrize("value", [True, False, 0, 1, "yes", "no", "true", "off", "maybe", 2, {"a": 1}, None, [], 1.5])
+def test_generate_sidebar_is_exactly_as_strict_as_the_sibling_booleans(value: Any) -> None:
+    def outcome(key: str) -> bool | None:
+        try:
+            return getattr(build(**{key: value}), key)
+        except ValidationError:
+            return None
+
+    assert outcome("generate_sidebar") == outcome("allow_auto_commit")
 
 
 def test_local_backend_passes_unknown_options_through_for_the_backend_to_validate() -> None:

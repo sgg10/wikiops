@@ -36,7 +36,7 @@ Unknown keys are rejected with `config.invalid`; the message lists the valid key
 Every plan (and every apply, which plans first) starts `ChangeSet.notes` with a `provider_target` note:
 
 ```text
-Provider 'wiki' (github_wiki) target: remote='https://github.com/acme/platform.wiki.git' workdir='/abs/cache/.../p-wiki' branch=master auth=env:GITHUB_TOKEN auto_commit=true auto_push=false sync_on_plan=true backend=local_files pending_paths=0 unpushed_commits=0
+Provider 'wiki' (github_wiki) target: remote='https://github.com/acme/platform.wiki.git' workdir='/abs/cache/.../p-wiki' branch=master auth=env:GITHUB_TOKEN auto_commit=true auto_push=false sync_on_plan=true backend=local_files sidebar=false pending_paths=0 unpushed_commits=0
 ```
 
 Check `remote=`, `workdir=`, `auto_commit=` and `auto_push=` before running `--apply`. Non-zero `pending_paths` or `unpushed_commits` mean earlier work is waiting in the clone and will ride the next commit or push. A `sync.stale_plan` warning means the plan did not fetch. If a `provider_target_unavailable` warning appears instead of the note, the target could not be confirmed (often `sync.remote_mismatch`); investigate before applying.

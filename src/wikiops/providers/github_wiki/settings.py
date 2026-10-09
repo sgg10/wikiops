@@ -340,6 +340,7 @@ class GithubWikiProviderSettings(ProviderSettings):
     commit: CommitSettings = Field(default_factory=CommitSettings)
     allow_auto_commit: bool = True
     allow_auto_push: bool = False
+    generate_sidebar: bool = False
     local_backend: LocalBackendSettings = Field(default_factory=LocalBackendSettings)
     git_timeout_seconds: int = Field(120, ge=5, le=3600)
 

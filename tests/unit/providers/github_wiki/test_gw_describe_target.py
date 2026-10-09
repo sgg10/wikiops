@@ -24,7 +24,7 @@ from wikiops.providers.github_wiki.workdir import manifest_path
 
 DEFAULT_NOTE = (
     "remote='https://github.com/acme/platform.wiki.git' workdir='{workdir}' branch=auto "
-    "auth=ambient auto_commit=true auto_push=false sync_on_plan=true backend=local_files"
+    "auth=ambient auto_commit=true auto_push=false sync_on_plan=true backend=local_files sidebar=false"
 )
 READ_ONLY = {"status", "rev-parse", "config", "symbolic-ref", "rev-list"}
 
@@ -74,10 +74,12 @@ def test_the_default_workdir_is_the_per_profile_cache_path_and_is_shown(tmp_path
     assert Path(workdir).parts[-4:] == ("github.com", "acme", "platform", "p-docs")
 
 
-def test_there_is_no_sidebar_key_and_no_stale_warning_by_default(tmp_path: Path) -> None:
+def test_the_sidebar_is_off_by_default_without_an_action_and_there_is_no_stale_warning(tmp_path: Path) -> None:
     note = build_provider(tmp_path).provider.describe_target()
+    fields = fields_of(note)
 
-    assert "sidebar=" not in note  # the path of tmp_path may spell "sidebar" via the test name
+    assert fields["sidebar"] == "false"
+    assert "sidebar_action" not in fields
     assert "stale_plan" not in note
     assert "pending_paths" not in note
 
@@ -97,8 +99,9 @@ def test_a_workdir_with_quotes_is_unambiguous_and_decodes_to_the_exact_path(
     assert fields["workdir"] == str(harness.workdir)
     assert fields["remote"] == "https://github.com/acme/platform.wiki.git"
     assert fields["backend"] == "local_files"  # the fields after the path are not swallowed by it
+    assert fields["sidebar"] == "false"
     assert list(fields) == [
-        "remote", "workdir", "branch", "auth", "auto_commit", "auto_push", "sync_on_plan", "backend",
+        "remote", "workdir", "branch", "auth", "auto_commit", "auto_push", "sync_on_plan", "backend", "sidebar",
     ]
 
 
@@ -185,6 +188,100 @@ def test_auto_push_is_shown_when_enabled(tmp_path: Path) -> None:
     fields = fields_of(harness.provider.describe_target())
 
     assert (fields["auto_commit"], fields["auto_push"]) == ("true", "true")
+
+
+# -- the sidebar keys (SB14, GWP-D3) -------------------------------------------------------------------
+
+MANAGED = "<!-- wikiops:managed sidebar -->\n\n- [Home](Home)\n"
+
+
+def test_an_enabled_sidebar_without_a_clone_says_create_and_runs_no_command(tmp_path: Path) -> None:
+    harness = build_provider(tmp_path, settings={"generate_sidebar": True})
+
+    fields = fields_of(harness.provider.describe_target())
+
+    assert (fields["sidebar"], fields["sidebar_action"]) == ("true", "create")
+    assert harness.runner.calls == []
+    assert list(fields)[-2:] == ["sidebar", "sidebar_action"]
+
+
+def test_an_enabled_sidebar_in_a_clone_without_the_file_says_create(tmp_path: Path) -> None:
+    harness = build_provider(tmp_path, cloned=True, settings={"generate_sidebar": True})
+
+    assert fields_of(harness.provider.describe_target())["sidebar_action"] == "create"
+
+
+@pytest.mark.parametrize(
+    ("content", "action"),
+    [
+        (MANAGED.encode(), "regenerate"),
+        (MANAGED.replace("\n", "\r\n").encode(), "regenerate"),
+        (b"# my own sidebar\n", "skipped-unmanaged"),
+        (b" " + MANAGED.encode(), "skipped-unmanaged"),
+        (b"\xff\xfe not utf-8\n", "skipped-unmanaged"),
+    ],
+    ids=["managed", "managed-crlf", "unmarked", "near-miss-marker", "undecodable"],
+)
+def test_an_enabled_sidebar_action_follows_the_file_in_the_clone(tmp_path: Path, content: bytes, action: str) -> None:
+    harness = build_provider(tmp_path, cloned=True, settings={"generate_sidebar": True})
+    (harness.workdir / "_Sidebar.md").write_bytes(content)
+
+    assert fields_of(harness.provider.describe_target())["sidebar_action"] == action
+
+
+def test_a_directory_in_place_of_the_sidebar_is_skipped_in_the_plan(tmp_path: Path) -> None:
+    harness = build_provider(tmp_path, cloned=True, settings={"generate_sidebar": True})
+    (harness.workdir / "_Sidebar.md").mkdir()
+
+    assert fields_of(harness.provider.describe_target())["sidebar_action"] == "skipped-unmanaged"
+
+
+def test_the_sidebar_plan_reads_only_the_clone_and_runs_no_extra_command(tmp_path: Path) -> None:
+    harness = build_provider(tmp_path, cloned=True, settings={"generate_sidebar": True})
+    (harness.workdir / "_Sidebar.md").write_text(MANAGED)
+    off = build_provider(tmp_path / "off", cloned=True)
+    off.provider.describe_target()
+
+    harness.provider.describe_target()
+
+    assert harness.git_subcommands() == off.git_subcommands()
+    assert harness.network_calls() == [] and harness.resolver.created == []
+
+
+def test_a_disabled_sidebar_never_looks_at_the_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    harness = build_provider(tmp_path, cloned=True)
+    (harness.workdir / "_Sidebar.md").write_text(MANAGED)
+
+    def forbidden(workdir: Path) -> str:
+        raise AssertionError("plan_action must not run when the sidebar is off")
+
+    monkeypatch.setattr("wikiops.providers.github_wiki.sidebar_io.plan_action", forbidden)
+
+    fields = fields_of(harness.provider.describe_target())
+
+    assert fields["sidebar"] == "false" and "sidebar_action" not in fields
+
+
+def test_the_sidebar_keys_keep_the_existing_keys_and_their_order(tmp_path: Path) -> None:
+    harness = build_provider(tmp_path, cloned=True, settings={"generate_sidebar": True})
+
+    assert list(fields_of(harness.provider.describe_target())) == [
+        "remote", "workdir", "branch", "auth", "auto_commit", "auto_push", "sync_on_plan", "backend",
+        "sidebar", "sidebar_action", "pending_paths", "unpushed_commits",
+    ]
+
+
+def test_the_sidebar_note_carries_no_hint_validation_secret_or_environment_value(tmp_path: Path) -> None:
+    harness = build_provider(
+        tmp_path,
+        cloned=True,
+        settings={"generate_sidebar": True, "auth": {"mode": "env", "variable": "WIKI_T"}},
+        environ={"WIKI_T": TOKEN},
+    )
+
+    note = harness.provider.describe_target()
+
+    assert TOKEN not in note and "sidebar.invalid_hint" not in note
 
 
 # -- no secrets, no network, nothing run before the clone exists ------------------------------------

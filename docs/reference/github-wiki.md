@@ -224,10 +224,10 @@ All commands run with the repository-selection variables (`GIT_DIR`, `GIT_WORK_T
 When the provider can describe its target, the host adds a `provider_target` note at the top of every plan and apply (see [`../guides/using-the-cli.md`](../guides/using-the-cli.md#provider-target-note)):
 
 ```text
-Provider 'wiki' (github_wiki) target: remote='https://github.com/acme/platform.wiki.git' workdir='/home/me/.cache/wikiops/github_wiki/github.com/acme/platform/p-wiki' branch=master auth=env:GITHUB_TOKEN auto_commit=true auto_push=false sync_on_plan=true backend=local_files pending_paths=0 unpushed_commits=0
+Provider 'wiki' (github_wiki) target: remote='https://github.com/acme/platform.wiki.git' workdir='/home/me/.cache/wikiops/github_wiki/github.com/acme/platform/p-wiki' branch=master auth=env:GITHUB_TOKEN auto_commit=true auto_push=false sync_on_plan=true backend=local_files sidebar=false pending_paths=0 unpushed_commits=0
 ```
 
-`branch=auto` appears until the branch is known; `pending_paths` and `unpushed_commits` appear once a clone exists. Building the note never touches the network, never issues a credential, and creates nothing. With `sync_on_plan: false` it also carries the `sync.stale_plan` warning. Read it before `--apply`: if `workdir=` or `remote=` is not what you meant, stop and fix the configuration.
+`branch=auto` appears until the branch is known; `sidebar=true|false` always shows the `generate_sidebar` setting and, only when it is `true`, `sidebar_action=create|regenerate|skipped-unmanaged` follows it (read from the local clone alone); `pending_paths` and `unpushed_commits` appear once a clone exists. Building the note never touches the network, never issues a credential, and creates nothing. With `sync_on_plan: false` it also carries the `sync.stale_plan` warning. Read it before `--apply`: if `workdir=` or `remote=` is not what you meant, stop and fix the configuration.
 
 ## Multiple Profiles
 

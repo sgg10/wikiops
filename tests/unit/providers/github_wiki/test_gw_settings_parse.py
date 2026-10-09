@@ -129,11 +129,24 @@ def test_unknown_key_names_it_and_lists_the_valid_keys() -> None:
     assert "provider_name" not in error.hint
 
 
-def test_generate_sidebar_is_just_an_unknown_key_in_this_change() -> None:
-    error = failure(make(generate_sidebar=True))
+def test_generate_sidebar_is_a_valid_setting() -> None:
+    assert parse_settings(make(generate_sidebar=True)).generate_sidebar is True
+    assert parse_settings(make()).generate_sidebar is False
+
+
+def test_a_non_boolean_generate_sidebar_is_config_invalid() -> None:
+    error = failure(make(generate_sidebar={"a": 1}))
 
     assert error.code == "config.invalid"
-    assert "Unknown setting 'generate_sidebar'" in str(error)
+    assert "generate_sidebar" in str(error)
+
+
+def test_an_unknown_key_next_to_generate_sidebar_still_lists_it_as_valid() -> None:
+    error = failure(make(generate_sidebars=True))
+
+    assert error.code == "config.invalid"
+    assert "Unknown setting 'generate_sidebars'" in str(error)
+    assert "generate_sidebar" in error.hint
 
 
 def test_nested_unknown_key_names_the_dotted_path_without_union_tags() -> None:
