@@ -789,3 +789,217 @@ def test_annotate_keeps_the_error_when_nothing_is_left_and_adds_the_note_otherwi
     wrapped = rollback.annotate(plain, leftovers)
     assert isinstance(wrapped, rollback.RollbackIncomplete)
     assert wrapped.cause is plain and "RuntimeError: boom" in str(wrapped) and "'a.md'" in str(wrapped)
+
+
+# -- restore_file: byte-level, confined restore of one generated file ------------------------------------
+
+
+SIDEBAR = "_Sidebar.md"
+OURS = b"ours\n"
+RAW_PREVIOUS = b"\xff\xfe previous \r\n\x00 bytes \xc3\x28\r\n"
+
+
+def restore_scene(tmp_path: Path, current: bytes | None = None) -> Path:
+    """A workdir holding a page, an asset and (when given) the file to restore."""
+    workdir = tmp_path / "wiki"
+    (workdir / "assets").mkdir(parents=True)
+    (workdir / "Page.md").write_bytes(b"# page\n")
+    (workdir / "assets" / "logo.png").write_bytes(PNG)
+    if current is not None:
+        (workdir / SIDEBAR).write_bytes(current)
+    return workdir
+
+
+def assert_bystanders_untouched(workdir: Path) -> None:
+    assert (workdir / "Page.md").read_bytes() == b"# page\n"
+    assert (workdir / "assets" / "logo.png").read_bytes() == PNG
+
+
+def test_restore_file_deletes_a_file_that_did_not_exist_before_and_is_still_ours(tmp_path: Path) -> None:
+    workdir = restore_scene(tmp_path, OURS)
+
+    result = rollback.restore_file(workdir, SIDEBAR, previous=None, ours=OURS)
+
+    assert result == rollback.RollbackResult()
+    assert not (workdir / SIDEBAR).exists()
+    assert_bystanders_untouched(workdir)
+
+
+@pytest.mark.parametrize(
+    "previous",
+    [
+        pytest.param(b"previous\n", id="plain"),
+        pytest.param(b"crlf\r\nlines\r\n", id="crlf"),
+        pytest.param(RAW_PREVIOUS, id="not-utf8-safe"),
+        pytest.param(b"", id="empty"),
+    ],
+)
+def test_restore_file_puts_the_previous_bytes_back_exactly(tmp_path: Path, previous: bytes) -> None:
+    workdir = restore_scene(tmp_path, OURS)
+
+    result = rollback.restore_file(workdir, SIDEBAR, previous=previous, ours=OURS)
+
+    assert result == rollback.RollbackResult()
+    assert (workdir / SIDEBAR).read_bytes() == previous
+    assert_bystanders_untouched(workdir)
+    assert sorted(entry.name for entry in workdir.iterdir()) == ["Page.md", SIDEBAR, "assets"]
+
+
+def test_restore_file_restores_a_file_that_vanished_when_there_was_a_previous_version(tmp_path: Path) -> None:
+    workdir = restore_scene(tmp_path)
+
+    result = rollback.restore_file(workdir, SIDEBAR, previous=b"previous\n", ours=OURS)
+
+    assert result == rollback.RollbackResult()
+    assert (workdir / SIDEBAR).read_bytes() == b"previous\n"
+
+
+def forbid_writes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make any write or delete the restore attempts fail the test."""
+
+    def refuse(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("nothing may be written or deleted")
+
+    monkeypatch.setattr("wikiops.providers._fs.atomic_write_bytes", refuse)
+    monkeypatch.setattr(Path, "unlink", refuse)
+
+
+def test_restore_file_is_a_clean_no_op_when_the_file_already_equals_the_previous_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workdir = restore_scene(tmp_path, b"previous\n")
+    forbid_writes(monkeypatch)
+
+    assert rollback.restore_file(workdir, SIDEBAR, previous=b"previous\n", ours=OURS) == rollback.RollbackResult()
+    assert (workdir / SIDEBAR).read_bytes() == b"previous\n"
+
+
+def test_restore_file_is_a_clean_no_op_when_nothing_existed_and_nothing_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workdir = restore_scene(tmp_path)
+    forbid_writes(monkeypatch)
+
+    assert rollback.restore_file(workdir, SIDEBAR, previous=None, ours=OURS) == rollback.RollbackResult()
+    assert not (workdir / SIDEBAR).exists()
+
+
+@pytest.mark.parametrize("previous", [None, b"previous\n"], ids=["no-previous", "with-previous"])
+def test_restore_file_leaves_a_foreign_edit_untouched_and_reports_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, previous: bytes | None
+) -> None:
+    workdir = restore_scene(tmp_path, b"the user edited this\n")
+    forbid_writes(monkeypatch)
+
+    result = rollback.restore_file(workdir, SIDEBAR, previous=previous, ours=OURS)
+
+    assert result == rollback.RollbackResult(foreign=(SIDEBAR,))
+    assert (workdir / SIDEBAR).read_bytes() == b"the user edited this\n"
+    assert "left untouched" in result.note and f"'{SIDEBAR}'" in result.note
+
+
+def test_restore_file_reports_a_directory_in_the_way_and_removes_nothing(tmp_path: Path) -> None:
+    workdir = restore_scene(tmp_path)
+    (workdir / SIDEBAR).mkdir()
+    (workdir / SIDEBAR / "inner.md").write_bytes(b"inside\n")
+
+    result = rollback.restore_file(workdir, SIDEBAR, previous=b"previous\n", ours=OURS)
+
+    assert result == rollback.RollbackResult(leftovers=(SIDEBAR,))
+    assert (workdir / SIDEBAR / "inner.md").read_bytes() == b"inside\n"
+
+
+def test_restore_file_never_writes_through_a_symlink_even_one_that_stays_inside(tmp_path: Path) -> None:
+    workdir = restore_scene(tmp_path)
+    (workdir / SIDEBAR).symlink_to("Page.md")
+
+    result = rollback.restore_file(workdir, SIDEBAR, previous=b"previous\n", ours=b"# page\n")
+
+    assert result == rollback.RollbackResult(leftovers=(SIDEBAR,))
+    assert (workdir / SIDEBAR).is_symlink()
+    assert_bystanders_untouched(workdir)
+
+
+def test_restore_file_refuses_a_symlink_that_escapes_the_workdir(tmp_path: Path) -> None:
+    workdir = restore_scene(tmp_path)
+    outside = tmp_path / "outside.md"
+    outside.write_bytes(OURS)
+    (workdir / SIDEBAR).symlink_to(outside)
+
+    result = rollback.restore_file(workdir, SIDEBAR, previous=None, ours=OURS)
+
+    assert result == rollback.RollbackResult(leftovers=(SIDEBAR,))
+    assert outside.read_bytes() == OURS
+
+
+def test_restore_file_refuses_a_directory_symlink_that_leads_out_of_the_workdir(tmp_path: Path) -> None:
+    workdir = restore_scene(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "victim.md").write_bytes(OURS)
+    (workdir / "link").symlink_to(outside, target_is_directory=True)
+
+    result = rollback.restore_file(workdir, "link/victim.md", previous=None, ours=OURS)
+
+    assert result == rollback.RollbackResult(leftovers=("link/victim.md",))
+    assert (outside / "victim.md").read_bytes() == OURS
+
+
+@pytest.mark.parametrize("path", ["../evil.md", "/etc/evil.md", "", "a/../../evil.md"])
+def test_restore_file_refuses_a_path_that_is_not_confined_to_the_workdir(tmp_path: Path, path: str) -> None:
+    workdir = restore_scene(tmp_path, OURS)
+
+    result = rollback.restore_file(workdir, path, previous=None, ours=OURS)
+
+    assert result == rollback.RollbackResult(leftovers=(path,))
+    assert (workdir / SIDEBAR).read_bytes() == OURS
+
+
+def test_restore_file_reports_a_write_that_fails_and_keeps_the_file_as_it_is(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workdir = restore_scene(tmp_path, OURS)
+
+    def refuse(*args: Any, **kwargs: Any) -> None:
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr("wikiops.providers._fs.atomic_write_bytes", refuse)
+
+    result = rollback.restore_file(workdir, SIDEBAR, previous=b"previous\n", ours=OURS)
+
+    assert result == rollback.RollbackResult(leftovers=(SIDEBAR,))
+    assert (workdir / SIDEBAR).read_bytes() == OURS
+
+
+def test_restore_file_reports_a_delete_that_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workdir = restore_scene(tmp_path, OURS)
+
+    def refuse(self: Path, *args: Any, **kwargs: Any) -> None:
+        raise PermissionError("read-only file system")
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+
+    result = rollback.restore_file(workdir, SIDEBAR, previous=None, ours=OURS)
+
+    assert result == rollback.RollbackResult(leftovers=(SIDEBAR,))
+    assert (workdir / SIDEBAR).read_bytes() == OURS
+
+
+def test_restore_file_reports_a_file_it_cannot_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workdir = restore_scene(tmp_path, OURS)
+
+    def refuse(self: Path) -> bytes:
+        raise PermissionError("permission denied")
+
+    monkeypatch.setattr(Path, "read_bytes", refuse)
+
+    result = rollback.restore_file(workdir, SIDEBAR, previous=b"previous\n", ours=OURS)
+
+    assert result == rollback.RollbackResult(leftovers=(SIDEBAR,))
+
+
+def test_restore_file_never_raises_for_a_workdir_that_does_not_exist(tmp_path: Path) -> None:
+    result = rollback.restore_file(tmp_path / "missing", SIDEBAR, previous=b"previous\n", ours=OURS)
+
+    assert result == rollback.RollbackResult(leftovers=(SIDEBAR,))
+    assert not (tmp_path / "missing").exists()
