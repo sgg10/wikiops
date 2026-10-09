@@ -19,6 +19,7 @@ Use `github_wiki` when the user wants documentation published to the wiki of a G
 - `commit.identity` (default `git`): `git`, `bot`, or `custom` (needs `name` and `email`); `commit.message` accepts only `{plugin_id}`, `{provider_name}`, `{page_count}`.
 - `allow_auto_commit` (default **`true`**) and `allow_auto_push` (default **`false`**; needs auto commit).
 - `local_backend` (default `{type: local_files}`): extra keys are the backend's options such as `assets_dir`.
+- `generate_sidebar` (default **`false`**): opt-in managed `_Sidebar.md`; see [Managed sidebar](#managed-sidebar). Enable it only when the user asks for a generated sidebar.
 - `git_timeout_seconds` (default `120`, 5 to 3600).
 
 Unknown keys are rejected with `config.invalid`; the message lists the valid keys.
@@ -29,7 +30,7 @@ Unknown keys are rejected with `config.invalid`; the message lists the valid key
 - Refs are **flat**: `Home.md`, `Release-Notes.md`. A path with `/` fails with `path.nested_not_supported`; use the flat name from the hint (`guides/setup.md` becomes `guides-setup.md`) only if the user agrees, because it changes the plugin's page names. Do not use Azure-style paths such as `/Engineering/Teams`.
 - Do not set `allow_auto_push: true` on your own. Pushing publishes the wiki; enable it only when the user asks. Do not change `workdir`, `branch`, or `auth` to get past an error without asking.
 - Never edit, stage, or commit files in the clone by hand while a run is in progress, and never delete the manifest or lock files without the user's agreement.
-- Sidebar generation is not supported yet: do not configure or promise `generate_sidebar`.
+- Do not set `generate_sidebar: true` on your own, and never edit a managed `_Sidebar.md` or its `<!-- wikiops:entry ... -->` comments by hand; to place pages, put hints in the plugin's operation metadata (see [Managed sidebar](#managed-sidebar)). A `_Sidebar.md` without the managed marker is the user's: never add the marker for them without asking.
 
 ## Before `--apply`: read the `provider_target` note
 
@@ -51,6 +52,27 @@ Check `remote=`, `workdir=`, `auto_commit=` and `auto_push=` before running `--a
 - Assets are stored under `assets_dir` and linked document-relative (`assets/x--<hash>.png`); root-anchored links and `raw.githubusercontent.com` URLs are refused. An asset upload alone never commits.
 - Concurrent runs on one clone fail fast with `workdir.locked`; do not run two applies against the same `workdir`.
 - The first wiki page must exist already (created in the web UI); the provider cannot create an empty wiki.
+
+## Managed sidebar
+
+With `generate_sidebar: true` every apply that wrote or skipped at least one page regenerates `_Sidebar.md` in the same commit as the pages. It starts with the exact line `<!-- wikiops:managed sidebar -->` and links every root page of the clone (names starting with `_` and non-`.md` files excluded). With `false` (default) nothing about the sidebar happens and `_Sidebar.md` is an ordinary page.
+
+- **Ownership.** A `_Sidebar.md` without that exact first line is never overwritten, parsed or committed: the pages are still applied and `sidebar.unmanaged_exists` is reported. The user can adopt it by adding the marker as the first line. While the setting is on, the name `_Sidebar.md` is reserved: writing, reading or resolving it fails with `path.reserved`; `_Footer.md` stays an ordinary page.
+- **Default order.** `Home` first, then pages alphabetically by link text (case-insensitive); ungrouped pages first, then one heading per group. The link text is the `label` hint, else the page name with `-` replaced by a space.
+- **Placement hints** (plugin authors): `metadata.github_wiki.sidebar` on create and update operations, `child_metadata.github_wiki.sidebar` on child creates:
+
+  ```yaml
+  github_wiki:
+    sidebar:                 # null clears group, order and label
+      group: Guides          # heading; non-empty single line, at most 80 characters
+      order: 10              # integer in -1000000..1000000 (not a boolean)
+      label: Install guide   # link text; non-empty single line, at most 80 characters
+  ```
+
+  Pages with an `order` come first (ascending), then the others; `Home` stays first in the ungrouped list unless it has a `group` or an `order`; groups are ordered by the lowest `order` among their pages.
+- **Sticky.** Placement is read back from the previous managed `_Sidebar.md`: pages not in the change set, operations without a hint and keys not mentioned keep it; a key set to `null` is cleared to its default; `sidebar: null` clears all three keys. Hints of `APPLIED` and `SKIPPED` operations count (a hint-only change updates the sidebar); hints of failed operations are ignored.
+- **Warnings, never failures.** An invalid hint (a typo such as `sidbar`, an unknown key, a wrong type or length, a hint on a page starting with `_`) is ignored as a whole and reported as `sidebar.invalid_hint`; a sidebar that cannot be written (backend error, ignored by git) is reported as `sidebar.write_failed` and restored to its previous bytes. The pages stay `APPLIED` and committed in both cases. The warnings are appended once to the message of the first `APPLIED` or `SKIPPED` operation, so read that message, not every result.
+- **Host limits to tell the user.** There is no hint validation at plan time (warnings appear only on apply, and the plan shows no sidebar content). The sidebar is regenerated only by page-writing applies, so it can be stale after pages are added or removed in the web UI and after asset-only, empty or all-failed runs. The `provider_target` note shows `sidebar=true` and `sidebar_action=create|regenerate|skipped-unmanaged` when the setting is on.
 
 ## Reading a failure
 
@@ -109,7 +131,7 @@ Match the code with `^\[(?P<ns>[a-z_]+):(?P<code>[a-z_]+(\.[a-z_]+)*)\]`, then r
 | Code | How to react |
 | --- | --- |
 | `path.nested_not_supported` | The path contains `/`. Use the flat name from the hint after the user agrees. |
-| `path.reserved` | A `.git` segment in the path. Pick another name. |
+| `path.reserved` | A `.git` segment in the path, or `_Sidebar.md` while `generate_sidebar: true` (the generated sidebar owns that name). Pick another name, or ask the user before setting `generate_sidebar: false`. |
 | `path.invalid_name` | The page name is blank before `.md`, has a control character, a line or paragraph separator or a bidi control character, or has leading or trailing whitespace. Use the corrected name from the hint after the user agrees. |
 | `path.not_markdown` | Use the `.md` name from the hint. |
 | `ref.unsupported_kind` / `ref.missing_path` | Use `kind: path` with a non-blank `locator.path`. |

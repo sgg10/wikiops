@@ -38,6 +38,11 @@ providers:
     # Push after committing (default false: commits stay local until you push).
     # Requires allow_auto_commit: true.
     allow_auto_push: false
+    # Maintain a managed _Sidebar.md that links every root page (default false).
+    # When true, "_Sidebar.md" is reserved (path.reserved) and plugins place pages with
+    # metadata.github_wiki.sidebar = {group, order, label}. An existing _Sidebar.md
+    # without the first line "<!-- wikiops:managed sidebar -->" is never overwritten.
+    generate_sidebar: false
     # Backend that writes the files into the clone; extra keys are its own options.
     local_backend:
       type: local_files
