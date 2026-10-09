@@ -110,7 +110,7 @@ Match the code with `^\[(?P<ns>[a-z_]+):(?P<code>[a-z_]+(\.[a-z_]+)*)\]`, then r
 | --- | --- |
 | `path.nested_not_supported` | The path contains `/`. Use the flat name from the hint after the user agrees. |
 | `path.reserved` | A `.git` segment in the path. Pick another name. |
-| `path.invalid_name` | The page name is blank before `.md`, has a control character, or has leading or trailing whitespace. Use the corrected name from the hint after the user agrees. |
+| `path.invalid_name` | The page name is blank before `.md`, has a control character, a line or paragraph separator or a bidi control character, or has leading or trailing whitespace. Use the corrected name from the hint after the user agrees. |
 | `path.not_markdown` | Use the `.md` name from the hint. |
 | `ref.unsupported_kind` / `ref.missing_path` | Use `kind: path` with a non-blank `locator.path`. |
 | `title.invalid` | The title cannot become a page name. Give a plain title or set an explicit `ref`. |
@@ -127,7 +127,7 @@ Match the code with `^\[(?P<ns>[a-z_]+):(?P<code>[a-z_]+(\.[a-z_]+)*)\]`, then r
 
 ### Sidebar warnings
 
-Warnings never fail a page operation: they are appended to an apply result message, not raised.
+Warnings never fail a page operation: they are appended to an apply result message, not raised, and only when `generate_sidebar: true` is set.
 
 | Code | How to react |
 | --- | --- |

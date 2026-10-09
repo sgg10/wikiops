@@ -345,6 +345,66 @@ def test_unsafe_name_without_a_usable_correction_gets_a_generic_hint(path: str) 
     assert "visible" in error.hint
 
 
+# Characters that no console shows but that split lines or reorder the text around them.
+LINE_SEPARATOR = chr(0x2028)
+PARAGRAPH_SEPARATOR = chr(0x2029)
+BIDI_CHARACTERS = [
+    pytest.param(chr(0x061C), id="arabic-letter-mark"),
+    pytest.param(chr(0x200E), id="left-to-right-mark"),
+    pytest.param(chr(0x200F), id="right-to-left-mark"),
+    *[pytest.param(chr(code), id=f"embedding-or-override-{code:04x}") for code in range(0x202A, 0x202F)],
+    *[pytest.param(chr(code), id=f"isolate-{code:04x}") for code in range(0x2066, 0x206A)],
+]
+
+
+@pytest.mark.parametrize("separator", [LINE_SEPARATOR, PARAGRAPH_SEPARATOR], ids=["line", "paragraph"])
+def test_unicode_line_and_paragraph_separators_in_a_name_are_invalid(separator: str) -> None:
+    for path in (f"a{separator}b.md", f"a{separator}b"):
+        error = failure(path_ref(path))
+
+        assert error.code == "path.invalid_name"
+        assert "separator" in error.summary and "separator" in error.hint
+        assert error.context["path"] == path
+        assert MESSAGE_SHAPE.match(str(error))
+        assert separator not in str(error)
+
+
+@pytest.mark.parametrize("char", BIDI_CHARACTERS)
+def test_bidirectional_control_characters_in_a_name_are_invalid(char: str) -> None:
+    for path in (f"a{char}b.md", f"{char}a.md", f"a{char}.md", f"a{char}b"):
+        error = failure(path_ref(path))
+
+        assert error.code == "path.invalid_name"
+        assert "bidirectional control characters" in error.summary
+        assert "bidirectional control characters" in error.hint
+        assert char not in str(error)
+        assert MESSAGE_SHAPE.match(str(error))
+
+
+@pytest.mark.parametrize(
+    ("char", "corrected"),
+    [(LINE_SEPARATOR, "a-b.md"), (PARAGRAPH_SEPARATOR, "a-b.md"), (chr(0x202E), "a-b.md"), (chr(0x2067), "a-b.md")],
+)
+def test_the_hint_for_separators_and_bidi_names_suggests_a_corrected_valid_name(char: str, corrected: str) -> None:
+    error = failure(path_ref(f"a{char}{char}b.md"))
+
+    assert f"'{corrected}'" in error.hint
+    assert validate_page_ref(path_ref(corrected)) == corrected
+
+
+def test_a_name_made_only_of_separators_or_bidi_characters_gets_a_generic_hint() -> None:
+    error = failure(path_ref(f"{LINE_SEPARATOR}{chr(0x202E)}.md"))
+
+    assert error.code == "path.invalid_name"
+    assert "use '" not in error.hint and "visible" in error.hint
+
+
+def test_names_with_other_invisible_characters_stay_accepted() -> None:
+    # Only separators and text-direction controls are rejected; zero-width characters are not.
+    for char in (chr(0x200B), chr(0x00AD)):
+        assert validate_page_ref(path_ref(f"a{char}b.md")) == f"a{char}b.md"
+
+
 def test_unsafe_names_are_reported_before_the_markdown_suffix_rule() -> None:
     assert failure(path_ref("notes\x00.txt")).code == "path.invalid_name"
     assert failure(path_ref("notes.txt ")).code == "path.invalid_name"

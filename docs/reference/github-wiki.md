@@ -163,7 +163,7 @@ A GitHub wiki is a flat set of root-level Markdown pages. Only path refs are sup
 - the path is a root page name that **ends in `.md`**, case-insensitive (`path.not_markdown`); the provider never appends the extension
 - the path must not contain separators: `guides/setup.md` fails with `path.nested_not_supported`, and the hint proposes the flat name `guides-setup.md`. The provider never flattens names on its own
 - a `.git` segment is reserved (`path.reserved`)
-- a name that exists but cannot be used is `path.invalid_name`: a blank stem such as `.md` or ` .md`, control characters (including NUL), and leading or trailing whitespace (also right before `.md`). The Hint states the exact problem and, when one exists, a corrected name (control-character runs become `-`, surrounding whitespace is dropped)
+- a name that exists but cannot be used is `path.invalid_name`: a blank stem such as `.md` or ` .md`, control characters (including NUL), Unicode line and paragraph separators (U+2028, U+2029), text-direction (bidi) control characters, and leading or trailing whitespace (also right before `.md`). The Hint states the exact problem and, when one exists, a corrected name (runs of control, separator and bidi characters become `-`, surrounding whitespace is dropped)
 
 Operations without a `ref` derive a root page from the title: whitespace runs become `-`, case and Unicode are preserved, and `.md` is appended (`Release Notes` becomes `Release-Notes.md`). A title that would need a separator, starts with `.`, or contains control or reserved characters (`/ \ : * ? " < > |`) fails with `title.invalid`. A `create_child_document` operation creates a **root page** too: wiki pages have no hierarchy, so the provider does not advertise `HIERARCHICAL_PAGES`.
 
@@ -247,7 +247,7 @@ Context entries (`workdir`, `path`, `sha`, ...) appear only when they apply, and
 ^\[(?P<ns>[a-z_]+):(?P<code>[a-z_]+(\.[a-z_]+)*)\]
 ```
 
-Failures during apply appear as `FAILED` entries in `=== APPLY RESULT ===`; the CLI then exits with code `1`. `sync.stale_plan` is a warning (kind `W`) appended to a plan note, and the three `sidebar.*` codes are warnings (kind `W`) appended to an apply result message; warnings never fail an operation, and every other code is an error.
+Failures during apply appear as `FAILED` entries in `=== APPLY RESULT ===`; the CLI then exits with code `1`. `sync.stale_plan` is a warning (kind `W`) appended to a plan note, and the three `sidebar.*` codes are warnings (kind `W`) appended to an apply result message, only when `generate_sidebar: true`; warnings never fail an operation, and every other code is an error.
 
 | Code | Meaning | Fix |
 | --- | --- | --- |
@@ -287,7 +287,7 @@ Failures during apply appear as `FAILED` entries in `=== APPLY RESULT ===`; the 
 | `workdir.locked` | Another wikiops run holds the clone's lock | Wait for it and retry |
 | `path.nested_not_supported` | The page path contains a separator | Use the flat name from the hint |
 | `path.reserved` | A `.git` segment in the path | Choose another page name |
-| `path.invalid_name` | The name is blank before `.md`, has control characters, or has leading or trailing whitespace | Use the corrected name from the hint |
+| `path.invalid_name` | The name is blank before `.md`, has control characters, line or paragraph separators or bidi control characters, or has leading or trailing whitespace | Use the corrected name from the hint |
 | `path.not_markdown` | The page path does not end in `.md` | Use the name from the hint |
 | `ref.unsupported_kind` | The ref is not `kind: path` | Use path refs |
 | `ref.missing_path` | `locator.path` is missing or blank, or the backend reported no page reference | Set `locator.path`; a backend must report `resolved_ref` |
@@ -299,9 +299,9 @@ Failures during apply appear as `FAILED` entries in `=== APPLY RESULT ===`; the 
 | `commit.failed` | `git add` or `git commit` failed (for example a hook), or a written path is ignored by git | Inspect the workdir; the paths stay pending |
 | `push.rejected` | The remote advanced since the sync | Reconcile in the workdir, then re-run |
 | `push.failed` | The push failed for another reason | Inspect the push output and the local commit |
-| `sidebar.unmanaged_exists` | Warning: `_Sidebar.md` exists without the managed marker, so it was left untouched | Add `<!-- wikiops:managed sidebar -->` as its first line to let wikiops manage it, or set `generate_sidebar: false` |
-| `sidebar.invalid_hint` | Warning: a sidebar placement hint was ignored as a whole | Use `metadata.github_wiki.sidebar = {group?: str<=80, order?: int in -1000000..1000000, label?: str<=80}` |
-| `sidebar.write_failed` | Warning: `_Sidebar.md` could not be generated; page operations are not affected | Fix the cause named in the message and re-run apply |
+| `sidebar.unmanaged_exists` | Warning (only with `generate_sidebar: true`): `_Sidebar.md` exists without the managed marker, so it was left untouched | Add `<!-- wikiops:managed sidebar -->` as its first line to let wikiops manage it, or set `generate_sidebar: false` |
+| `sidebar.invalid_hint` | Warning (only with `generate_sidebar: true`): a sidebar placement hint was ignored as a whole | Use `metadata.github_wiki.sidebar = {group?: str<=80, order?: int in -1000000..1000000, label?: str<=80}` |
+| `sidebar.write_failed` | Warning (only with `generate_sidebar: true`): `_Sidebar.md` could not be generated; page operations are not affected | Fix the cause named in the message and re-run apply |
 
 ## Current Implementation Boundaries
 

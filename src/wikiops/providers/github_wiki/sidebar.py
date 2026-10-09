@@ -136,13 +136,33 @@ def page_name(file_name: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _is_edge(char: str) -> bool:
+    """Whether ``char`` is whitespace or invisible: it shows nothing at the edge of a text."""
+    return char.isspace() or INVISIBLE_CHARACTERS.fullmatch(char) is not None
+
+
+def _trim(text: str) -> str:
+    """Return ``text`` without the whitespace and invisible characters at either edge.
+
+    Plain ``str.strip`` misses zero-width, bidi and BOM padding, so a group padded with
+    one would be a second, identical-looking group. Inner characters are kept. One scan
+    from each end, so the cost is linear.
+    """
+    start, end = 0, len(text)
+    while start < end and _is_edge(text[start]):
+        start += 1
+    while end > start and _is_edge(text[end - 1]):
+        end -= 1
+    return text[start:end]
+
+
 def _is_blank(text: str) -> bool:
     """Whether ``text`` shows nothing: only whitespace and invisible characters.
 
     One definition for validation and rendering, so a value the hints accept can never
     render as an empty link text or an empty group heading.
     """
-    return not INVISIBLE_CHARACTERS.sub("", text).strip()
+    return not _trim(text)
 
 
 def _check_text(field: str, value: Any) -> HintProblem | None:
@@ -213,7 +233,7 @@ def _validate_sidebar(sidebar: Any) -> HintPatch | HintProblem:
         return problem
     group = sidebar.get("group", UNSET)
     return HintPatch(
-        group=group.strip() if isinstance(group, str) else group,
+        group=_trim(group) if isinstance(group, str) else group,
         order=sidebar.get("order", UNSET),
         label=sidebar.get("label", UNSET),
     )
@@ -337,13 +357,14 @@ def display_label(page: str, placement: Placement) -> str:
 
 
 def _group_name(placement: Placement) -> str | None:
-    """Return the group a placement belongs to: stripped, ``None`` when blank or unset.
+    """Return the group a placement belongs to: trimmed, ``None`` when blank or unset.
 
-    Padded and unpadded spellings are one group, and a blank group is no group.
+    Spellings that differ only in edge whitespace or invisible padding are one group, and a
+    blank group is no group.
     """
-    if placement.group is None or _is_blank(placement.group):
+    if placement.group is None:
         return None
-    return placement.group.strip()
+    return _trim(placement.group) or None
 
 
 def _normalized(placement: Placement) -> Placement:

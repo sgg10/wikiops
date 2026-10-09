@@ -392,6 +392,39 @@ def test_validate_hint_group_is_normalized_by_stripping(value, expected):
     assert patch_of(hint({"group": value})).group == expected
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (f"{ZERO_WIDTH}Guides{BOM}", "Guides"),
+        (f"{BIDI_OVERRIDE} Guides {ZERO_WIDTH}", "Guides"),
+        (f" {ZERO_WIDTH}{NBSP}G{BOM} ", "G"),
+        (f"{SOFT_HYPHEN}{BOM}{ZERO_WIDTH}Guides", "Guides"),
+        (f"Gu{ZERO_WIDTH}ides", f"Gu{ZERO_WIDTH}ides"),
+        (f"{ZERO_WIDTH}Gu{BOM}ides{ZERO_WIDTH}", f"Gu{BOM}ides"),
+    ],
+    ids=["zero-width-and-bom", "bidi-and-spaces", "mixed", "soft-hyphen-run", "inner-kept", "inner-bom-kept"],
+)
+def test_validate_hint_group_is_trimmed_of_edge_whitespace_and_invisible_characters(value, expected):
+    assert patch_of(hint({"group": value})).group == expected
+
+
+@pytest.mark.parametrize("value", [f"{ZERO_WIDTH}Install", f"Install{BOM}", f" {BIDI_OVERRIDE}Install "])
+def test_validate_hint_label_keeps_invisible_edges_exactly(value):
+    assert patch_of(hint({"label": value})).label == value
+
+
+def test_group_spellings_differing_only_in_invisible_padding_merge_into_one_group():
+    patches, rejected = collect(
+        [
+            HintSource("op1", "A.md", hint({"group": f"{ZERO_WIDTH}Guides{BOM}"})),
+            HintSource("op2", "B.md", hint({"group": "Guides"})),
+        ]
+    )
+
+    assert rejected == ()
+    assert merge({}, patches) == {"A": Placement(group="Guides"), "B": Placement(group="Guides")}
+
+
 def test_padded_and_unpadded_group_spellings_merge_into_one_group():
     patches, rejected = collect(
         [

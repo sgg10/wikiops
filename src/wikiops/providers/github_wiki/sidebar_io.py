@@ -190,6 +190,11 @@ class SidebarWriter:
         self._ours: bytes | None = None
         self._was_recorded = False
 
+    def _forget(self) -> None:
+        """Drop what a write left behind: only a write still standing may be restored later."""
+        self._previous = self._ours = None
+        self._was_recorded = False
+
     # -- regenerate ---------------------------------------------------------------
 
     def regenerate(self, sources: Sequence[sidebar.HintSource]) -> SidebarReport:
@@ -201,6 +206,7 @@ class SidebarWriter:
         equal the file nothing is written (SB11).
         """
         warnings: tuple[str, ...] = ()
+        self._forget()
         try:
             patches, rejected = sidebar.collect(sources)
             warnings = tuple(sidebar.render_hint_warning(item) for item in rejected)
@@ -236,8 +242,18 @@ class SidebarWriter:
                 new_content=rendered,
                 expected_version=document.version,
             )
-        previous_bytes = None if document is None else document.content.encode("utf-8")
+        previous_bytes = None if document is None else self._raw_sidebar()
         return self._write(operation, previous_bytes, rendered.encode("utf-8"), warnings)
+
+    def _raw_sidebar(self) -> bytes:
+        """The exact bytes of ``_Sidebar.md`` on disk, which the restore must put back.
+
+        The backend hands over decoded text, which is only byte-exact when it never
+        normalizes (line ends, a BOM, ...), so the snapshot is read from the clone itself,
+        confined to it. May raise, which the caller reports as ``sidebar.write_failed``.
+        """
+        root = self._git.workdir.resolve()
+        return _fs.resolve_within_root(root, layout.SIDEBAR_PAGE).read_bytes()
 
     def _unusable_target(self) -> str | None:
         """Why ``_Sidebar.md`` cannot be written at all, or ``None`` (absent or a regular file)."""
@@ -266,12 +282,14 @@ class SidebarWriter:
                 self._changeset.model_copy(update={"operations": [operation]})
             )
             if not self._verified(reply):
+                self._forget()
                 return SidebarReport((), warnings, None)
             self._manifest.record([layout.SIDEBAR_PAGE])
         except Exception as error:  # noqa: BLE001 - whatever failed, the file goes back as it was
             restore = rollback.restore_file(
                 self._git.workdir, layout.SIDEBAR_PAGE, previous=previous, ours=ours
             )
+            self._forget()  # already restored (or reported): no later restore may run again
             return SidebarReport((), warnings, _write_failed(_failure_summary(error), restore))
         return SidebarReport((layout.SIDEBAR_PAGE,), warnings, None)
 

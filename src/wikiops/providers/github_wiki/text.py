@@ -29,6 +29,22 @@ INVISIBLE_CHARACTERS = re.compile(
 )
 
 
+def _character_class(*spans: tuple[int, int]) -> re.Pattern[str]:
+    """Compile a class of the code point ``spans``; built from numbers, so the source stays ASCII."""
+    body = "".join(
+        chr(first) if first == last else f"{chr(first)}-{chr(last)}" for first, last in spans
+    )
+    return re.compile(f"[{body}]")
+
+
+# Unicode line and paragraph separators (U+2028, U+2029): not C0/C1 controls, yet they end a
+# line for ``str.splitlines`` and many viewers.
+LINE_SEPARATORS = _character_class((0x2028, 0x2029))
+# Text-direction controls that reorder what surrounds them: Arabic letter mark, left/right
+# marks (U+200E-200F), embeddings and overrides (U+202A-202E) and isolates (U+2066-2069).
+BIDI_CONTROLS = _character_class((0x061C, 0x061C), (0x200E, 0x200F), (0x202A, 0x202E), (0x2066, 0x2069))
+
+
 def has_control_characters(value: str) -> bool:
     """Whether ``value`` holds a C0 control, DEL or a C1 control character."""
     return CONTROL_CHARACTERS.search(value) is not None

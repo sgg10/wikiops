@@ -370,6 +370,27 @@ def test_order_padded_and_unpadded_groups_are_one_group_named_without_padding():
     assert order(["z", "y", "x"], placements) == (("Guides", ("x", "y", "z")),)
 
 
+INVISIBLE_PADDINGS = [
+    pytest.param(ZERO_WIDTH + "Guides", id="zero-width-leading"),
+    pytest.param("Guides" + BOM, id="bom-trailing"),
+    pytest.param(f" {ZERO_WIDTH}{BOM}Guides{NBSP}{ZERO_WIDTH} ", id="mixed"),
+    pytest.param(chr(0x202E) + "Guides" + chr(0x202C), id="bidi"),
+]
+
+
+@pytest.mark.parametrize("group", INVISIBLE_PADDINGS)
+def test_order_groups_that_only_differ_in_invisible_padding_are_one_group(group):
+    placements = {"x": p(group=group), "y": p(group="Guides")}
+
+    assert order(["y", "x"], placements) == (("Guides", ("x", "y")),)
+
+
+def test_order_keeps_invisible_characters_inside_a_group_name():
+    inner = f"Gu{ZERO_WIDTH}ides"
+
+    assert order(["x"], {"x": p(group=inner)}) == ((inner, ("x",)),)
+
+
 def test_order_group_padding_does_not_change_the_group_rank():
     placements = {"x": p(group=" B", order=1), "y": p(group="A", order=5)}
 
@@ -560,6 +581,20 @@ def test_render_padded_and_unpadded_groups_share_one_heading_and_one_recorded_na
     placements = {"x": p(group=" Guides "), "y": p(group="Guides")}
 
     assert render(["x", "y"], placements) == listing(
+        MARKER,
+        "",
+        "**Guides**",
+        "",
+        entry("x", "x", '{"group":"Guides","page":"x"}'),
+        entry("y", "y", '{"group":"Guides","page":"y"}'),
+    )
+
+
+@pytest.mark.parametrize("group", INVISIBLE_PADDINGS)
+def test_render_invisible_group_padding_shares_one_heading_and_is_not_recorded(group):
+    text = render(["x", "y"], {"x": p(group=group), "y": p(group="Guides")})
+
+    assert text == listing(
         MARKER,
         "",
         "**Guides**",

@@ -562,6 +562,124 @@ def test_any_failure_restores_the_previous_bytes_and_says_write_failed(
     assert (harness.workdir / "assets" / "logo.png").read_bytes() == b"\x89PNG bytes"
 
 
+def normalizing_backend(harness: SidebarHarness, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A backend whose documents come back with LF line ends, whatever the file holds."""
+    real_get = harness.backend.get_document
+
+    def get_document(ref: Any) -> Any:
+        document = real_get(ref)
+        return document.model_copy(update={"content": document.content.replace("\r\n", "\n")})
+
+    monkeypatch.setattr(harness.backend, "get_document", get_document)
+
+
+@pytest.mark.parametrize("failure", ["backend-raises-after-writing", "failed-result", "manifest-record-fails"])
+def test_the_restore_snapshot_is_the_raw_bytes_on_disk_not_the_backends_decoded_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    harness = scene(tmp_path, "Home")
+    before = harness.seed(PREVIOUS_CRLF, committed=True)
+    normalizing_backend(harness, monkeypatch)
+    FAILURES[failure](harness, monkeypatch)
+
+    report = harness.writer().regenerate([])
+
+    assert_failed(report)
+    assert harness.sidebar() == before
+    assert b"\r\n" in before
+
+
+def test_the_post_publish_restore_also_returns_the_raw_bytes_on_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = scene(tmp_path, "Home")
+    before = harness.seed(PREVIOUS_CRLF, committed=True)
+    normalizing_backend(harness, monkeypatch)
+    writer = harness.writer()
+    assert writer.regenerate([]).generated == (SIDEBAR_PAGE,)
+
+    writer.restore_after_publish()
+
+    assert harness.sidebar() == before
+
+
+def test_a_sidebar_the_backend_reports_but_the_disk_cannot_give_is_a_write_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = scene(tmp_path, "Home")
+    harness.seed(PREVIOUS_LF, committed=True)
+    monkeypatch.setattr("wikiops.providers._fs.resolve_within_root", lambda root, path: root / "missing.md")
+
+    report = harness.writer().regenerate([])
+
+    assert_failed(report)
+    assert harness.backend.applied == []
+
+
+def spy_on_restore(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
+    real_restore = rollback.restore_file
+
+    def spy(workdir: Path, path: str, **kwargs: Any) -> Any:
+        calls.append(kwargs)
+        return real_restore(workdir, path, **kwargs)
+
+    monkeypatch.setattr(rollback, "restore_file", spy)
+    return calls
+
+
+@pytest.mark.parametrize("failure", sorted(FAILURES))
+def test_a_failed_write_cannot_be_restored_a_second_time_after_publish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    harness = scene(tmp_path, "Home")
+    before = harness.seed(PREVIOUS_LF, pending=True)
+    FAILURES[failure](harness, monkeypatch)
+    writer = harness.writer()
+    assert_failed(writer.regenerate([]))
+    calls = spy_on_restore(monkeypatch)
+    touched: list[str] = []
+    monkeypatch.setattr(harness.manifest, "record", lambda paths: touched.append("record"))
+    monkeypatch.setattr(harness.manifest, "discard", lambda paths: touched.append("discard"))
+
+    text = writer.restore_after_publish()
+
+    assert "sidebar.write_failed" in text and "ignored by git" in text
+    assert calls == [] and touched == []
+    assert harness.sidebar() == before
+
+
+def test_a_skipped_write_cannot_be_restored_after_publish(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    harness = scene(tmp_path, "Home")
+    harness.seed(PREVIOUS_LF, committed=True)
+    harness.backend.on_apply = lambda changeset, real: reply(outcome(SKIPPED))
+    writer = harness.writer()
+    assert writer.regenerate([]).generated == ()
+    written = harness.sidebar()
+    calls = spy_on_restore(monkeypatch)
+    touched: list[str] = []
+    monkeypatch.setattr(harness.manifest, "discard", lambda paths: touched.append("discard"))
+
+    writer.restore_after_publish()
+
+    assert calls == [] and touched == []
+    assert harness.sidebar() == written
+
+
+def test_a_writer_that_regenerates_again_forgets_the_previous_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = scene(tmp_path, "Home")
+    writer = harness.writer()
+    assert writer.regenerate([]).generated == (SIDEBAR_PAGE,)
+    assert writer.regenerate([]).generated == ()  # identical bytes: nothing written this time
+    calls = spy_on_restore(monkeypatch)
+
+    writer.restore_after_publish()
+
+    assert calls == []
+
+
 def test_a_failed_regeneration_leaves_a_pending_previous_sidebar_pending(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 import time
 from collections.abc import Callable
 from typing import Any
@@ -28,6 +29,7 @@ from wikiops.providers.github_wiki.sidebar import (
     render,
     validate_hint,
 )
+from wikiops.providers.github_wiki.text import INVISIBLE_CHARACTERS
 
 PREFIX = " <!-- wikiops:entry "
 SUFFIX = " -->"
@@ -559,14 +561,22 @@ ADVERSARIAL = [
 ]
 
 
+EDGE_NOISE = re.compile(rf"^(?:\s|{INVISIBLE_CHARACTERS.pattern})+|(?:\s|{INVISIBLE_CHARACTERS.pattern})+$")
+
+
+def trimmed_group(text: str) -> str:
+    """The group as it is stored: edge whitespace and invisible characters removed."""
+    return EDGE_NOISE.sub("", text)
+
+
 @pytest.mark.parametrize("text", ADVERSARIAL)
 def test_parse_recovers_adversarial_group_and_label_exactly(text):
     placements = {"Page": p(group=text, order=3, label=text)}
 
     parsed = parse(render(["Page"], placements))
 
-    # The group is stored stripped; the label keeps its exact value.
-    assert parsed == {"Page": p(group=text.strip(), order=3, label=text)}
+    # The group is stored trimmed; the label keeps its exact value.
+    assert parsed == {"Page": p(group=trimmed_group(text), order=3, label=text)}
 
 
 @pytest.mark.parametrize("text", ADVERSARIAL)
@@ -576,7 +586,31 @@ def test_parse_adversarial_text_forges_no_other_entry(text):
     parsed = parse(render(["Page", "Other"], placements))
 
     assert set(parsed) == {"Page", "Other"}
-    assert parsed == {"Page": p(group=text.strip(), label=text), "Other": p(order=1)}
+    assert parsed == {"Page": p(group=trimmed_group(text), label=text), "Other": p(order=1)}
+
+
+@pytest.mark.parametrize(
+    "group",
+    [
+        chr(0x200B) + "Guides",
+        "Guides" + chr(0xFEFF),
+        f" {chr(0x202E)}Guides{chr(0x200B)} ",
+    ],
+    ids=["zero-width", "bom", "bidi-and-spaces"],
+)
+def test_round_trip_is_byte_identical_for_a_group_padded_with_invisible_characters(group):
+    placements = {"A": p(group=group, order=1), "B": p(group="Guides")}
+    first = render(["A", "B"], placements)
+
+    assert parse(first) == {"A": p(group="Guides", order=1), "B": p(group="Guides")}
+    assert render(["A", "B"], merge(parse(first), ())) == first
+    assert first.count("**Guides**") == 1
+
+
+def test_a_hand_written_record_with_an_invisibly_padded_group_is_read_trimmed():
+    record = record_for(page="Install", group=chr(0x200B) + "Guides" + chr(0xFEFF))
+
+    assert parse(managed(line(record))) == {"Install": p(group="Guides")}
 
 
 @pytest.mark.parametrize(
@@ -708,11 +742,11 @@ def random_scenario(seed: int) -> tuple[list[str], dict[str, Placement]]:
 
 
 def expected_for(pages: list[str], placements: dict[str, Placement]) -> dict[str, Placement]:
-    """The placements ``render`` keeps: a group is stored stripped, everything else as given."""
+    """The placements ``render`` keeps: a group is stored trimmed, everything else as given."""
     expected = {}
     for stem in pages:
         placement = placements.get(stem, Placement())
-        group = None if placement.group is None else placement.group.strip()
+        group = None if placement.group is None else trimmed_group(placement.group)
         expected[stem] = Placement(group=group, order=placement.order, label=placement.label)
     return expected
 
