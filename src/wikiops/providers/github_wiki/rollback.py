@@ -18,14 +18,21 @@ is new" would destroy their work. A path is therefore rolled back only when BOTH
 A tracked file is restored from HEAD, an untracked one is deleted. Every other new path is
 left alone and reported as foreign. ``roll_back`` never raises: what it could not undo is
 in the returned ``RollbackResult``, so the caller can say so instead of hiding it.
+
+``restore_file`` is the byte-level sibling for ONE generated file that was already in the
+clone before the write (the managed sidebar): it puts back exactly the bytes the file held,
+only when the file still holds what this operation wrote, and never touches another path.
 """
 
 from __future__ import annotations
 
+import os
+import stat
 from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from pathlib import Path
 
+from wikiops.providers import _fs
 from wikiops.providers.github_wiki.errors import GithubWikiError
 from wikiops.providers.github_wiki.git import Git
 from wikiops.providers.github_wiki.manifest import StatusEntry, parse_status_entries
@@ -177,3 +184,56 @@ def roll_back(
         entry.path for entry in ours if entry.untracked and not _delete(git.workdir, entry.path)
     ]
     return RollbackResult(leftovers=tuple(sorted(left)), foreign=tuple(foreign))
+
+
+def _read_regular_file(workdir: Path, path: str) -> tuple[Path, bytes | None]:
+    """Return the confined real path of ``path`` and its bytes (``None`` when it is missing).
+
+    Raises ``FsError``/``OSError`` when the path leaves the workdir, is not a plain regular
+    file (a directory, or a symbolic link even one that stays inside, whose target is not
+    ours to rewrite) or cannot be read.
+    """
+    root = workdir.resolve()
+    target = _fs.resolve_within_root(root, path)
+    try:
+        mode = os.lstat(root.joinpath(*Path(path).parts)).st_mode
+    except FileNotFoundError:
+        return target, None
+    if not stat.S_ISREG(mode):
+        raise OSError(f"'{path}' is not a regular file")
+    return target, target.read_bytes()
+
+
+def restore_file(
+    workdir: Path, path: str, *, previous: bytes | None, ours: bytes
+) -> RollbackResult:
+    """Put ``path`` back as it was before this operation wrote ``ours`` over it; never raises.
+
+    ``previous`` is what the file held before (``None``: it did not exist) and ``ours`` what
+    this operation wrote, both as exact bytes, so a CRLF or non-UTF-8 file comes back
+    byte-for-byte. What is done depends on what the file holds NOW:
+
+    * the same bytes as ``previous`` (or nothing, when ``previous`` is ``None``): already as
+      it was, nothing to do;
+    * neither ``previous`` nor ``ours``: somebody else changed it meanwhile; it is left
+      untouched and reported as ``foreign``;
+    * ``ours`` (or gone, with a ``previous`` to bring back): deleted when it did not exist
+      before, otherwise atomically rewritten with ``previous``.
+
+    A path outside the workdir, a directory or symbolic link in its place, an unreadable
+    file or a failed write or delete is reported in ``leftovers``. Nothing but ``path`` is
+    ever read, written or deleted.
+    """
+    try:
+        target, current = _read_regular_file(workdir, path)
+        if current == previous:
+            return RollbackResult()
+        if current is not None and current != ours:
+            return RollbackResult(foreign=(path,))
+        if previous is None:
+            target.unlink()
+        else:
+            _fs.atomic_write_bytes(target, previous, root_real=workdir.resolve())
+    except (OSError, _fs.FsError, ValueError):
+        return RollbackResult(leftovers=(path,))
+    return RollbackResult()

@@ -27,13 +27,23 @@ from wikiops.providers.github_wiki.settings import (
     check_host,
     check_repository,
 )
-from wikiops.providers.github_wiki.text import CONTROL_CHARACTERS, has_control_characters
+from wikiops.providers.github_wiki.text import (
+    BIDI_CONTROLS,
+    LINE_SEPARATORS,
+    PAGE_NAME_UNSAFE_CHARACTERS,
+    has_control_characters,
+)
 
+SIDEBAR_PAGE = "_Sidebar.md"
+# Hint of ``path.reserved`` when the generated sidebar owns the page name.
+SIDEBAR_RESERVED_HINT = "use another path or disable generate_sidebar"
 _MARKDOWN_SUFFIX = ".md"
 _FOREIGN_MARKDOWN_SUFFIXES = frozenset({".markdown", ".mdx", ".txt"})
 _RESERVED_SEGMENT = ".git"
 _SEPARATORS = re.compile(r"[/\\]")
 _WHITESPACE_RUN = re.compile(r"\s+")
+# What a corrected name drops: every character a flat page name may not contain.
+_UNSAFE_RUN = re.compile(f"{PAGE_NAME_UNSAFE_CHARACTERS.pattern}+")
 _TITLE_FORBIDDEN_CHARS = frozenset('/\\:*?"<>|')
 _RAW_CONTENT_URL = re.compile(
     r"https?://raw\.githubusercontent\.com(?:[:/?#]|$)", re.IGNORECASE
@@ -95,14 +105,24 @@ _NAME_EXAMPLE = "'Home.md'"
 def _unsafe_name_problem(path: str, *, has_suffix: bool) -> _NameProblem | None:
     """Return why the flat page name ``path`` is unsafe, or ``None`` when it is fine.
 
-    Control characters (including NUL) and leading or trailing whitespace are
-    rejected: they cannot be told apart on screen, trip git and file systems
-    (Windows silently trims them) and would make two names look identical.
-    Whitespace right before the ``.md`` suffix counts as trailing whitespace of
-    the stem.
+    Control characters (including NUL), Unicode line and paragraph separators,
+    text-direction (bidi) controls and leading or trailing whitespace are
+    rejected: they cannot be told apart on screen, split or reorder the name
+    where it is shown, trip git and file systems (Windows silently trims
+    whitespace) and would make two names look identical. Whitespace right before
+    the ``.md`` suffix counts as trailing whitespace of the stem.
     """
     if has_control_characters(path):
         return _NameProblem("it contains control characters", "remove the control characters")
+    if LINE_SEPARATORS.search(path):
+        return _NameProblem(
+            "it contains a line or paragraph separator", "remove the separator characters"
+        )
+    if BIDI_CONTROLS.search(path):
+        return _NameProblem(
+            "it contains bidirectional control characters",
+            "remove the bidirectional control characters",
+        )
     stem = path[: -len(_MARKDOWN_SUFFIX)] if has_suffix else path
     if path != path.strip() or stem != stem.strip():
         return _NameProblem(
@@ -114,12 +134,13 @@ def _unsafe_name_problem(path: str, *, has_suffix: bool) -> _NameProblem | None:
 def _corrected_name(path: str, *, has_suffix: bool) -> str:
     """Return a valid page name derived from the unsafe ``path``, or ``""`` when none exists.
 
-    Runs of control characters become one ``-``, whitespace around the stem is
+    Runs of control, separator and bidirectional control characters become one ``-``,
+    whitespace around the stem is
     dropped (inner spaces stay) and ``.md`` is appended unless present. Nothing
     is returned when no visible character is left before ``.md``.
     """
     stem = path[: -len(_MARKDOWN_SUFFIX)] if has_suffix else path
-    pieces = (piece.strip() for piece in CONTROL_CHARACTERS.split(stem))
+    pieces = (piece.strip() for piece in _UNSAFE_RUN.split(stem))
     name = "-".join(piece for piece in pieces if piece)
     if not name:
         return ""
@@ -134,16 +155,23 @@ def _invalid_name_error(summary: str, *, path: str, hint: str) -> GithubWikiErro
     return GithubWikiError("path.invalid_name", summary, context={"path": path}, hint=hint)
 
 
-def validate_page_ref(ref: DocumentRef) -> str:
+def validate_page_ref(ref: DocumentRef, *, reserve_sidebar: bool = False) -> str:
     """Return the root-level ``.md`` page name of ``ref`` or raise a coded error.
 
     Checks run in a fixed order and the first failure wins: reference kind
     (``ref.unsupported_kind``), presence of a path (``ref.missing_path``), a
-    ``.git`` component (``path.reserved``), any path separator
+    ``.git`` component (``path.reserved``), the generated sidebar's name when
+    ``reserve_sidebar`` is set (``path.reserved``), any path separator
     (``path.nested_not_supported``), a blank stem before ``.md``
     (``path.invalid_name``), an unsafe name (``path.invalid_name``) and the
     ``.md`` suffix, case-insensitive (``path.not_markdown``). The returned name
     is the path unchanged.
+
+    ``reserve_sidebar`` is off by default, so every caller keeps treating
+    ``_Sidebar.md`` as an ordinary page; a caller that generates the sidebar sets
+    it to keep plugins from writing (and spoofing) the managed file. The name is
+    compared case-insensitively, since a case-insensitive file system would
+    alias ``_sidebar.md`` to it.
 
     Code choices: ``ref.missing_path`` is only for a reference that carries no
     path at all (absent or blank). A name that exists but cannot be used (a
@@ -171,6 +199,13 @@ def validate_page_ref(ref: DocumentRef) -> str:
             "path.reserved",
             "The path contains a reserved '.git' component",
             context={"path": path},
+        )
+    if reserve_sidebar and path.casefold() == SIDEBAR_PAGE.casefold():
+        raise GithubWikiError(
+            "path.reserved",
+            f"The page name '{SIDEBAR_PAGE}' is reserved for the generated sidebar",
+            context={"path": path},
+            hint=SIDEBAR_RESERVED_HINT,
         )
     if len(segments) > 1:
         raise _nested_error(path)

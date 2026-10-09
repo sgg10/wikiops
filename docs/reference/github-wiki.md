@@ -44,6 +44,7 @@ Optional settings:
 | `commit.message` | `docs(wiki): update via wikiops plugin {plugin_id}` | Commit message template; placeholders `{plugin_id}`, `{provider_name}`, `{page_count}` |
 | `allow_auto_commit` | `true` | Commit what an apply wrote |
 | `allow_auto_push` | `false` | Push the commits after an apply; requires `allow_auto_commit: true` |
+| `generate_sidebar` | `false` | Generate and maintain a managed `_Sidebar.md` that links every root page (see [Managed Sidebar](#managed-sidebar)). With `false` nothing about the sidebar happens and `_Sidebar.md` is an ordinary page |
 | `local_backend` | `{type: local_files}` | Backend that writes the files into the clone; extra keys are the backend's own options |
 | `git_timeout_seconds` | `120` | Time limit of every git command, from `5` to `3600` |
 
@@ -67,6 +68,7 @@ providers:
       message: "docs(wiki): update via wikiops plugin {plugin_id}"
     allow_auto_commit: true
     allow_auto_push: false
+    generate_sidebar: false   # true: maintain a managed _Sidebar.md (see Managed Sidebar)
     local_backend:
       type: local_files
       assets_dir: assets
@@ -162,12 +164,12 @@ A GitHub wiki is a flat set of root-level Markdown pages. Only path refs are sup
 - `kind` must be `path` (`ref.unsupported_kind` otherwise) and `locator.path` is required (`ref.missing_path`)
 - the path is a root page name that **ends in `.md`**, case-insensitive (`path.not_markdown`); the provider never appends the extension
 - the path must not contain separators: `guides/setup.md` fails with `path.nested_not_supported`, and the hint proposes the flat name `guides-setup.md`. The provider never flattens names on its own
-- a `.git` segment is reserved (`path.reserved`)
-- a name that exists but cannot be used is `path.invalid_name`: a blank stem such as `.md` or ` .md`, control characters (including NUL), and leading or trailing whitespace (also right before `.md`). The Hint states the exact problem and, when one exists, a corrected name (control-character runs become `-`, surrounding whitespace is dropped)
+- a `.git` segment is reserved (`path.reserved`); with `generate_sidebar: true` the page name `_Sidebar.md` is reserved too, whatever its letter case
+- a name that exists but cannot be used is `path.invalid_name`: a blank stem such as `.md` or ` .md`, control characters (including NUL), Unicode line and paragraph separators (U+2028, U+2029), text-direction (bidi) control characters, and leading or trailing whitespace (also right before `.md`). The Hint states the exact problem and, when one exists, a corrected name (runs of control, separator and bidi characters become `-`, surrounding whitespace is dropped)
 
 Operations without a `ref` derive a root page from the title: whitespace runs become `-`, case and Unicode are preserved, and `.md` is appended (`Release Notes` becomes `Release-Notes.md`). A title that would need a separator, starts with `.`, or contains control or reserved characters (`/ \ : * ? " < > |`) fails with `title.invalid`. A `create_child_document` operation creates a **root page** too: wiki pages have no hierarchy, so the provider does not advertise `HIERARCHICAL_PAGES`.
 
-Special wiki pages such as `_Sidebar.md` and `_Footer.md` are ordinary flat pages to the provider. Sidebar generation is not supported yet (see [Current Implementation Boundaries](#current-implementation-boundaries)).
+Special wiki pages such as `_Sidebar.md` and `_Footer.md` are ordinary flat pages to the provider, except that `_Sidebar.md` is generated and reserved when `generate_sidebar: true` (see [Managed Sidebar](#managed-sidebar)). `_Footer.md` is never generated.
 
 `build_link(ref)` returns the wiki URL `https://<host>/<owner>/<repo>/wiki/<page-stem>` (percent-encoded).
 
@@ -189,6 +191,69 @@ Two forms are refused because they break on private wikis:
 Page content authored by a plugin is never scanned or rewritten by the provider; the guard applies to the references the backend reports. A backend asset reference that is not a canonical root-relative path is `asset.ref_unsupported`.
 
 Uploading an asset never commits: the file stays pending (recorded in the manifest) and rides the next committing apply, together with the pages that use it.
+
+## Managed Sidebar
+
+With `generate_sidebar: true` the provider writes and maintains `_Sidebar.md`, the navigation GitHub shows beside every wiki page. The setting is opt-in and defaults to `false`: with `false` the provider never reads, writes, stages or validates anything for the sidebar, ignores sidebar hints without checking them, and `_Sidebar.md` is an ordinary root page exactly as before (even if the file carries the managed marker).
+
+### Ownership And The Managed Marker
+
+A generated sidebar starts with this exact first line, which does not render:
+
+```text
+<!-- wikiops:managed sidebar -->
+```
+
+A `_Sidebar.md` is managed only if its first line equals the marker (one trailing carriage return is tolerated). A line with a leading space, trailing text or a byte order mark does not count.
+
+- **Unmarked sidebar: never overwritten.** If `_Sidebar.md` exists without the marker, the provider does not parse, modify, stage or commit it. The pages of the apply are written and committed normally, the file stays byte-identical, and the `sidebar.unmanaged_exists` warning is reported. To let wikiops manage your sidebar, add the marker as its first line (the existing entries are then regenerated, falling back to defaults where they cannot be read); to opt out, set `generate_sidebar: false`.
+- **The name is reserved.** While the setting is `true`, any reference to `_Sidebar.md` (create, update, a child create or title that resolves to it, `resolve_ref`, `exists`, `get_document`) fails with `path.reserved`, at plan and at apply, with a hint naming `generate_sidebar`. A plugin therefore cannot write the marker file itself. Other pages, including `_Footer.md`, are unaffected.
+
+### What The Sidebar Contains
+
+The sidebar lists **every root page present in the clone** after the apply's writes, not only the pages of the change set. Names starting with `_` (such as `_Sidebar.md` and `_Footer.md`), files that are not `.md`, symbolic links, names the page policy rejects and untracked files hidden by an ignore rule are left out; a page deleted outside wikiops is dropped on the next regeneration.
+
+Each entry is a relative link to the page name (percent-encoded, never starting with `/`, never a URL). The link text is the `label` hint, else the page name with each `-` replaced by a space (`Getting-Started` becomes `Getting Started`). Labels and group names are escaped, so markdown or HTML in them cannot change the structure. Every entry line also ends with an invisible HTML comment (`<!-- wikiops:entry {...} -->`) that records the page's placement; that record is how placement survives between runs, so do not edit entry lines by hand.
+
+Ordering is deterministic (the same pages and hints always give the same bytes):
+
+- ungrouped pages come first, then one `**Group**` heading per group
+- without hints the order is `Home` first (when it exists), then the other pages alphabetically by link text, case-insensitive, ties by page name
+- inside a list, pages with an `order` come first in ascending order (ties by link text, then name), then the pages without one; `Home` stays first in the ungrouped list only while it has neither a `group` nor an `order` (a `label` alone keeps it first)
+- groups are ordered by the lowest `order` among their pages (pages without `order` count as last), ties by group name, case-insensitive
+
+### Placement Hints
+
+A plugin places a page with metadata on the operation that writes it: `metadata` for create and update operations, `child_metadata` for child-create operations.
+
+```yaml
+github_wiki:
+  sidebar:                 # null clears group, order and label
+    group: Guides          # optional; null clears; non-empty single line, at most 80 characters
+    order: 10              # optional; null clears; integer in -1000000..1000000 (not a boolean)
+    label: Install guide   # optional; null clears; non-empty single line, at most 80 characters
+```
+
+- The full key path is `metadata.github_wiki.sidebar` (`child_metadata.github_wiki.sidebar` for child creates). Any other key below `github_wiki`, any key other than `group`, `order` and `label`, or a hint on a page whose name starts with `_` makes the hint invalid.
+- **Sticky.** Placement is recovered only from the previous managed `_Sidebar.md`. A page that is not in the change set keeps its placement; an operation without a hint, or without one of the keys, keeps it too; a key that is present overrides; a key set to `null` is cleared to its default; `sidebar: null` clears all three keys. New pages without hints get the defaults. When several operations in one apply target the same page, their hints are applied in plan order and later keys win.
+- **Which operations count.** The hints of operations that end `APPLIED` or `SKIPPED` (identical content) count, so a hint-only change on an unchanged page still updates the sidebar. Hints of `FAILED` operations and of operations rejected by the page policy are ignored silently.
+- **An invalid hint never fails its page.** The operation proceeds, the whole hint is ignored (no partial application) and the previous or default placement stays. The `sidebar.invalid_hint` warning names the operation, the page, the offending field and the expected shape.
+- A hand-edited managed sidebar whose entries can no longer be read falls back to defaults for those pages, and a managed sidebar larger than 1 MiB is not parsed at all; in both cases the run succeeds and the sidebar is regenerated.
+
+### Commit And Failure Behavior
+
+- **Same commit.** The sidebar is written through the configured backend inside the apply lock, after the pages and before publishing, and is staged by exact path with them, so the pages and `_Sidebar.md` land in the same commit. It is recorded in the pending manifest like a page, but it is not counted in `{page_count}`.
+- **No commit for nothing.** If the regenerated bytes equal the file, nothing is written and no commit is made for it. With `allow_auto_commit: false` the sidebar is written and left pending, and the next committing apply includes it.
+- **Failures are warnings.** If the sidebar cannot be produced (the backend fails, the existing file cannot be read, a link is refused, or `_Sidebar.md` is ignored by a `.gitignore` or `.git/info/exclude` rule), the pages stay `APPLIED` and committed, `_Sidebar.md` is neither staged nor recorded, and `sidebar.write_failed` is reported. The rollback is confined to `_Sidebar.md`: it is put back byte-for-byte as it was before the apply (or removed when it did not exist), never touching pages or assets, and a concurrent foreign edit of the file is left untouched and named in the warning. An ignored sidebar is never silently dropped and never fails a page operation.
+- **Where warnings appear.** `sidebar.invalid_hint`, `sidebar.unmanaged_exists` and `sidebar.write_failed` are appended once to the message of the first `APPLIED` or `SKIPPED` operation of the result (not repeated on others, existing commit and push notes are kept): invalid-hint warnings in operation order, then at most one of `sidebar.unmanaged_exists` and `sidebar.write_failed`. If no operation was applied or skipped there is no sidebar activity and no warning.
+
+### Plan Visibility And Host Limits
+
+With the setting on, the `provider_target` note carries `sidebar=true` and `sidebar_action=create|regenerate|skipped-unmanaged` (see [Plan Note](#plan-note)), derived only from the local clone.
+
+- **No hint validation at plan time.** Hints are checked when the change set is applied, so an invalid hint appears as a warning on apply, never in the plan. The plan shows neither the sidebar content nor a diff.
+- **The sidebar is regenerated only by page-writing applies.** An apply regenerates it when at least one document operation reached the backend and ended `APPLIED` or `SKIPPED`. It is left untouched for an empty change set, when every operation failed the page policy or failed, for asset-only runs, and when the host skips `apply_changes`. Pages added or removed in the web UI therefore leave the sidebar stale until the next page-writing apply, which reads the clone (so the page pulled from the web is listed).
+- Uncommitted hand edits to a managed `_Sidebar.md` block the next run as `workdir.dirty`, like any foreign change.
 
 ## Commit Behavior
 
@@ -224,10 +289,10 @@ All commands run with the repository-selection variables (`GIT_DIR`, `GIT_WORK_T
 When the provider can describe its target, the host adds a `provider_target` note at the top of every plan and apply (see [`../guides/using-the-cli.md`](../guides/using-the-cli.md#provider-target-note)):
 
 ```text
-Provider 'wiki' (github_wiki) target: remote='https://github.com/acme/platform.wiki.git' workdir='/home/me/.cache/wikiops/github_wiki/github.com/acme/platform/p-wiki' branch=master auth=env:GITHUB_TOKEN auto_commit=true auto_push=false sync_on_plan=true backend=local_files pending_paths=0 unpushed_commits=0
+Provider 'wiki' (github_wiki) target: remote='https://github.com/acme/platform.wiki.git' workdir='/home/me/.cache/wikiops/github_wiki/github.com/acme/platform/p-wiki' branch=master auth=env:GITHUB_TOKEN auto_commit=true auto_push=false sync_on_plan=true backend=local_files sidebar=false pending_paths=0 unpushed_commits=0
 ```
 
-`branch=auto` appears until the branch is known; `pending_paths` and `unpushed_commits` appear once a clone exists. Building the note never touches the network, never issues a credential, and creates nothing. With `sync_on_plan: false` it also carries the `sync.stale_plan` warning. Read it before `--apply`: if `workdir=` or `remote=` is not what you meant, stop and fix the configuration.
+`branch=auto` appears until the branch is known; `sidebar=true|false` always shows the `generate_sidebar` setting and, only when it is `true`, `sidebar_action=create|regenerate|skipped-unmanaged` follows it (read from the local clone alone); `pending_paths` and `unpushed_commits` appear once a clone exists. Building the note never touches the network, never issues a credential, and creates nothing. With `sync_on_plan: false` it also carries the `sync.stale_plan` warning. Read it before `--apply`: if `workdir=` or `remote=` is not what you meant, stop and fix the configuration.
 
 ## Multiple Profiles
 
@@ -247,7 +312,7 @@ Context entries (`workdir`, `path`, `sha`, ...) appear only when they apply, and
 ^\[(?P<ns>[a-z_]+):(?P<code>[a-z_]+(\.[a-z_]+)*)\]
 ```
 
-Failures during apply appear as `FAILED` entries in `=== APPLY RESULT ===`; the CLI then exits with code `1`. `sync.stale_plan` is a warning (kind `W`) appended to a plan note; every other code is an error.
+Failures during apply appear as `FAILED` entries in `=== APPLY RESULT ===`; the CLI then exits with code `1`. `sync.stale_plan` is a warning (kind `W`) appended to a plan note, and the three `sidebar.*` codes are warnings (kind `W`) appended to an apply result message, only when `generate_sidebar: true`; warnings never fail an operation, and every other code is an error.
 
 | Code | Meaning | Fix |
 | --- | --- | --- |
@@ -286,8 +351,8 @@ Failures during apply appear as `FAILED` entries in `=== APPLY RESULT ===`; the 
 | `workdir.dirty` | Foreign changes exist in the clone | Commit, stash, or discard the listed paths, or change `workdir` |
 | `workdir.locked` | Another wikiops run holds the clone's lock | Wait for it and retry |
 | `path.nested_not_supported` | The page path contains a separator | Use the flat name from the hint |
-| `path.reserved` | A `.git` segment in the path | Choose another page name |
-| `path.invalid_name` | The name is blank before `.md`, has control characters, or has leading or trailing whitespace | Use the corrected name from the hint |
+| `path.reserved` | A `.git` segment in the path, or the name `_Sidebar.md` while `generate_sidebar: true` | Choose another page name (or set `generate_sidebar: false` to write `_Sidebar.md` yourself) |
+| `path.invalid_name` | The name is blank before `.md`, has control characters, line or paragraph separators or bidi control characters, or has leading or trailing whitespace | Use the corrected name from the hint |
 | `path.not_markdown` | The page path does not end in `.md` | Use the name from the hint |
 | `ref.unsupported_kind` | The ref is not `kind: path` | Use path refs |
 | `ref.missing_path` | `locator.path` is missing or blank, or the backend reported no page reference | Set `locator.path`; a backend must report `resolved_ref` |
@@ -299,11 +364,15 @@ Failures during apply appear as `FAILED` entries in `=== APPLY RESULT ===`; the 
 | `commit.failed` | `git add` or `git commit` failed (for example a hook), or a written path is ignored by git | Inspect the workdir; the paths stay pending |
 | `push.rejected` | The remote advanced since the sync | Reconcile in the workdir, then re-run |
 | `push.failed` | The push failed for another reason | Inspect the push output and the local commit |
+| `sidebar.unmanaged_exists` | Warning (only with `generate_sidebar: true`): `_Sidebar.md` exists without the managed marker, so it was left untouched | Add `<!-- wikiops:managed sidebar -->` as its first line to let wikiops manage it, or set `generate_sidebar: false` |
+| `sidebar.invalid_hint` | Warning (only with `generate_sidebar: true`): a sidebar placement hint was ignored as a whole | Use `metadata.github_wiki.sidebar = {group?: str<=80, order?: int in -1000000..1000000, label?: str<=80}` |
+| `sidebar.write_failed` | Warning (only with `generate_sidebar: true`): `_Sidebar.md` could not be generated; page operations are not affected | Fix the cause named in the message and re-run apply |
 
 ## Current Implementation Boundaries
 
 - path refs only, Markdown pages (`.md`) at the wiki root
-- no sidebar or footer generation; `generate_sidebar` is not available and is planned as a later release
+- only the sidebar is generated (opt-in `generate_sidebar`); there is no footer generation
+- the sidebar has no plan-time hint validation and is regenerated only by page-writing applies (see [Managed Sidebar](#managed-sidebar))
 - no delete, move, or rename operations
 - no plan-time warning for a create that conflicts with an existing page
 - no rebase, merge commit, or force push, ever; history problems are reported and left to you

@@ -13,6 +13,10 @@ forward blindly:
   them are never part of the written set, so they can never be staged.
 * ``fail_ignored`` and ``ignored_error`` turn a write that git ignores into a loud failure.
 * ``annotate`` maps what publishing did (a note, or a coded error) onto the results.
+* ``Settled.generated``, ``with_generated``, ``hint_sources``, ``first_carrier`` and
+  ``attach_warnings`` are the sidebar's share of an apply: the generated file joins the written
+  set without becoming a page, the placement hints of the pages that were written or skipped
+  are extracted, and the sidebar warnings ride on exactly one result.
 * ``page_targets``, ``asset_owner`` and ``rollback_owner`` say which paths an operation (a
   page write or an asset upload, whether sent alone or inside a change set) is the one to
   write, which is all the rollback may touch if it has to undo that operation.
@@ -22,8 +26,8 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -43,6 +47,7 @@ from wikiops.providers.github_wiki import layout
 from wikiops.providers.github_wiki.errors import GithubWikiError
 from wikiops.providers.github_wiki.redaction import Redactor
 from wikiops.providers.github_wiki.rollback import RollbackIncomplete, RollbackResult
+from wikiops.providers.github_wiki.sidebar import HintSource
 
 _NO_RESULT = "The backend returned no result for this operation"
 
@@ -63,10 +68,13 @@ class Settled:
     pages: tuple[str, ...]
     assets: tuple[str, ...]
     rejected: tuple[str, ...] = ()  # ids of operations the backend applied and the provider refused
+    # Files the provider generated itself (the managed sidebar): staged and recorded with the
+    # written paths, but never a page, so they stay out of ``len(pages)`` (the commit's page count).
+    generated: tuple[str, ...] = ()
 
     @property
     def written(self) -> tuple[str, ...]:
-        return (*self.pages, *self.assets)
+        return (*self.pages, *self.assets, *self.generated)
 
 
 def failed(
@@ -195,11 +203,15 @@ def rollback_owner(
 # -- before the backend -------------------------------------------------------------------
 
 
-def _checked(operation: Any, provider_name: str) -> Any:
-    """The operation to delegate (with a derived root ref when it had none) or a coded error."""
+def _checked(operation: Any, provider_name: str, *, reserve_sidebar: bool) -> Any:
+    """The operation to delegate (with a derived root ref when it had none) or a coded error.
+
+    A reserved sidebar name is refused for the reference the operation carries and for the one
+    derived from a title, so no operation can reach ``_Sidebar.md`` by either road.
+    """
     if isinstance(operation, (CreateDocumentOperation, CreateChildDocumentOperation)):
         if operation.ref is not None:
-            layout.validate_page_ref(operation.ref)
+            layout.validate_page_ref(operation.ref, reserve_sidebar=reserve_sidebar)
             return operation
         title = (
             operation.child_title
@@ -207,19 +219,26 @@ def _checked(operation: Any, provider_name: str) -> Any:
             else operation.title
         )
         derived = layout.derive_root_ref(title, provider=provider_name)
+        layout.validate_page_ref(derived, reserve_sidebar=reserve_sidebar)
         return operation.model_copy(update={"ref": derived})
     if isinstance(operation, UpdateDocumentOperation):
-        layout.validate_page_ref(operation.ref)
+        layout.validate_page_ref(operation.ref, reserve_sidebar=reserve_sidebar)
     return operation
 
 
-def prepare(operations: Sequence[Any], *, provider_name: str) -> Prepared:
-    """Apply the page policy per operation: failures are kept apart and never delegated."""
+def prepare(
+    operations: Sequence[Any], *, provider_name: str, reserve_sidebar: bool = False
+) -> Prepared:
+    """Apply the page policy per operation: failures are kept apart and never delegated.
+
+    ``reserve_sidebar`` (the ``generate_sidebar`` setting) makes the generated ``_Sidebar.md``
+    a reserved name (``path.reserved``); off, it is an ordinary page as it always was.
+    """
     delegated: list[Any] = []
     failures: dict[str, AppliedOperationResult] = {}
     for operation in operations:
         try:
-            delegated.append(_checked(operation, provider_name))
+            delegated.append(_checked(operation, provider_name, reserve_sidebar=reserve_sidebar))
         except GithubWikiError as error:
             failures[operation.operation_id] = failed(
                 operation.operation_id, str(error), ref=_document_ref(operation)
@@ -288,7 +307,12 @@ def note_rollback(settled: Settled, result: RollbackResult) -> Settled:
         results[operation_id] = item.model_copy(
             update={"message": with_note(item.message, result.note)}
         )
-    return Settled(results, settled.pages, settled.assets, settled.rejected)
+    return replace(settled, results=results)
+
+
+def with_generated(settled: Settled, generated: tuple[str, ...]) -> Settled:
+    """``settled`` with the files the provider generated joining the written set."""
+    return replace(settled, generated=generated)
 
 
 def in_order(
@@ -391,6 +415,78 @@ def annotate(
     return [
         item.model_copy(update={"status": OperationStatus.FAILED, "message": str(error)})
         if item.status is carried
+        else item
+        for item in results
+    ]
+
+
+# -- the sidebar's share of an apply ---------------------------------------------------------------
+
+
+def _hint_metadata(operation: Any) -> Mapping[str, Any] | None:
+    """The metadata that may carry a sidebar hint: ``child_metadata`` for a child create."""
+    if isinstance(operation, CreateChildDocumentOperation):
+        return operation.child_metadata
+    if isinstance(operation, (CreateDocumentOperation, UpdateDocumentOperation)):
+        return operation.metadata
+    return None
+
+
+def hint_sources(
+    delegated: Iterable[Any], results: Mapping[str, AppliedOperationResult]
+) -> tuple[HintSource, ...]:
+    """The placement hints of the page operations that were written or skipped, in plan order.
+
+    A FAILED result (the backend's, or one the provider made of a rejected report), an
+    operation without a result and an asset upload contribute nothing, silently: their pages
+    are not in the clone because of this apply. ``delegated`` carries the derived reference of
+    a ref-less create, so the page is the one the backend wrote.
+    """
+    sources: list[HintSource] = []
+    for operation in delegated:
+        result = results.get(operation.operation_id)
+        metadata = _hint_metadata(operation)
+        ref = _document_ref(operation)
+        if (
+            result is None
+            or result.status not in (OperationStatus.APPLIED, OperationStatus.SKIPPED)
+            or metadata is None
+            or ref is None
+        ):
+            continue
+        try:
+            page = layout.validate_page_ref(ref)
+        except GithubWikiError:
+            continue
+        sources.append(HintSource(operation.operation_id, page, metadata))
+    return tuple(sources)
+
+
+_CARRIERS = (OperationStatus.APPLIED, OperationStatus.SKIPPED)
+
+
+def first_carrier(results: Sequence[AppliedOperationResult]) -> str | None:
+    """The id of the first APPLIED or SKIPPED result in plan order, or ``None``."""
+    return next((item.operation_id for item in results if item.status in _CARRIERS), None)
+
+
+def attach_warnings(
+    results: list[AppliedOperationResult], warnings: Sequence[str], *, fallback: str | None
+) -> list[AppliedOperationResult]:
+    """Append ``warnings`` once, to the message of the first APPLIED or SKIPPED result.
+
+    The existing message (a commit or push note included) stays first. When publishing turned
+    every such result into a failure the warnings would be lost, so they go to the result
+    ``fallback`` names instead (the carrier chosen before publishing). Nothing is ever added:
+    with no carrier at all the results come back as they are.
+    """
+    if not warnings:
+        return results
+    carrier = first_carrier(results) or fallback
+    text = " ".join(warnings)
+    return [
+        item.model_copy(update={"message": with_note(item.message, text)})
+        if item.operation_id == carrier
         else item
         for item in results
     ]

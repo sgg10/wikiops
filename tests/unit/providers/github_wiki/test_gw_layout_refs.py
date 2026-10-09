@@ -13,7 +13,11 @@ from wikiops_sdk.domain import DocumentRef, RefKind
 
 from wikiops.core.exceptions import ConfigurationError
 from wikiops.providers.github_wiki.errors import GithubWikiError
-from wikiops.providers.github_wiki.layout import derive_root_ref, validate_page_ref
+from wikiops.providers.github_wiki.layout import (
+    SIDEBAR_PAGE,
+    derive_root_ref,
+    validate_page_ref,
+)
 
 MESSAGE_SHAPE = re.compile(r"^\[github_wiki:[a-z_]+\.[a-z_]+\] .+ Hint: .+\.$")
 
@@ -23,9 +27,9 @@ def path_ref(path: str | None, *, kind: RefKind = RefKind.PATH) -> DocumentRef:
     return DocumentRef(provider="wiki", kind=kind, locator=locator)
 
 
-def failure(ref: DocumentRef) -> GithubWikiError:
+def failure(ref: DocumentRef, **options: bool) -> GithubWikiError:
     with pytest.raises(GithubWikiError) as caught:
-        validate_page_ref(ref)
+        validate_page_ref(ref, **options)
     return caught.value
 
 
@@ -52,8 +56,80 @@ def test_flat_markdown_page_is_accepted_and_returned_unchanged(path: str) -> Non
     assert validate_page_ref(path_ref(path)) == path
 
 
-def test_sidebar_page_is_an_ordinary_page_in_this_change() -> None:
+def test_sidebar_page_is_an_ordinary_page_by_default() -> None:
     assert validate_page_ref(path_ref("_Sidebar.md")) == "_Sidebar.md"
+    assert validate_page_ref(path_ref("_Sidebar.md"), reserve_sidebar=False) == "_Sidebar.md"
+
+
+def test_the_sidebar_page_constant_is_the_generated_file_name() -> None:
+    assert SIDEBAR_PAGE == "_Sidebar.md"
+
+
+# -- path.reserved: the generated sidebar page (opt-in) -----------------------
+
+
+@pytest.mark.parametrize(
+    "path", ["_Sidebar.md", "_sidebar.md", "_SIDEBAR.MD", "_Sidebar.Md", "_sIdEbAr.mD"]
+)
+def test_sidebar_page_is_reserved_when_requested_in_any_letter_case(path: str) -> None:
+    error = failure(path_ref(path), reserve_sidebar=True)
+
+    assert error.code == "path.reserved"
+    assert error.context["path"] == path
+    assert "generate_sidebar" in error.hint
+    assert error.hint == "use another path or disable generate_sidebar"
+    assert "'_Sidebar.md' is reserved for the generated sidebar" in str(error)
+    assert MESSAGE_SHAPE.match(str(error))
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "_Footer.md",
+        "Sidebar.md",
+        "x_Sidebar.md",
+        "_Sidebar.md.md",
+        "_Sidebar-2.md",
+        "Home.md",
+    ],
+)
+def test_only_the_exact_sidebar_name_is_reserved(path: str) -> None:
+    assert validate_page_ref(path_ref(path), reserve_sidebar=True) == path
+
+
+def test_git_component_is_reserved_with_its_own_hint_whatever_the_flag() -> None:
+    plain = failure(path_ref(".git/config"))
+    flagged = failure(path_ref(".git/config"), reserve_sidebar=True)
+
+    assert flagged.code == plain.code == "path.reserved"
+    assert flagged.hint == plain.hint
+    assert "generate_sidebar" not in flagged.hint
+    assert str(flagged) == str(plain)
+
+
+def test_a_git_component_wins_over_the_sidebar_name() -> None:
+    error = failure(path_ref(".git/_Sidebar.md"), reserve_sidebar=True)
+
+    assert "generate_sidebar" not in error.hint
+    assert error.context["path"] == ".git/_Sidebar.md"
+
+
+def test_a_nested_sidebar_path_is_still_a_nested_error() -> None:
+    assert failure(path_ref("a/_Sidebar.md"), reserve_sidebar=True).code == (
+        "path.nested_not_supported"
+    )
+
+
+def test_the_other_ref_checks_still_run_first_when_the_sidebar_is_reserved() -> None:
+    assert failure(path_ref("_Sidebar.md", kind=RefKind.ID), reserve_sidebar=True).code == (
+        "ref.unsupported_kind"
+    )
+    assert failure(path_ref("  "), reserve_sidebar=True).code == "ref.missing_path"
+
+
+def test_reserve_sidebar_is_keyword_only() -> None:
+    with pytest.raises(TypeError):
+        validate_page_ref(path_ref("Home.md"), True)  # type: ignore[misc]
 
 
 # -- ref.unsupported_kind / ref.missing_path ---------------------------------
@@ -267,6 +343,66 @@ def test_unsafe_name_without_a_usable_correction_gets_a_generic_hint(path: str) 
     assert error.code == "path.invalid_name"
     assert "use '" not in error.hint
     assert "visible" in error.hint
+
+
+# Characters that no console shows but that split lines or reorder the text around them.
+LINE_SEPARATOR = chr(0x2028)
+PARAGRAPH_SEPARATOR = chr(0x2029)
+BIDI_CHARACTERS = [
+    pytest.param(chr(0x061C), id="arabic-letter-mark"),
+    pytest.param(chr(0x200E), id="left-to-right-mark"),
+    pytest.param(chr(0x200F), id="right-to-left-mark"),
+    *[pytest.param(chr(code), id=f"embedding-or-override-{code:04x}") for code in range(0x202A, 0x202F)],
+    *[pytest.param(chr(code), id=f"isolate-{code:04x}") for code in range(0x2066, 0x206A)],
+]
+
+
+@pytest.mark.parametrize("separator", [LINE_SEPARATOR, PARAGRAPH_SEPARATOR], ids=["line", "paragraph"])
+def test_unicode_line_and_paragraph_separators_in_a_name_are_invalid(separator: str) -> None:
+    for path in (f"a{separator}b.md", f"a{separator}b"):
+        error = failure(path_ref(path))
+
+        assert error.code == "path.invalid_name"
+        assert "separator" in error.summary and "separator" in error.hint
+        assert error.context["path"] == path
+        assert MESSAGE_SHAPE.match(str(error))
+        assert separator not in str(error)
+
+
+@pytest.mark.parametrize("char", BIDI_CHARACTERS)
+def test_bidirectional_control_characters_in_a_name_are_invalid(char: str) -> None:
+    for path in (f"a{char}b.md", f"{char}a.md", f"a{char}.md", f"a{char}b"):
+        error = failure(path_ref(path))
+
+        assert error.code == "path.invalid_name"
+        assert "bidirectional control characters" in error.summary
+        assert "bidirectional control characters" in error.hint
+        assert char not in str(error)
+        assert MESSAGE_SHAPE.match(str(error))
+
+
+@pytest.mark.parametrize(
+    ("char", "corrected"),
+    [(LINE_SEPARATOR, "a-b.md"), (PARAGRAPH_SEPARATOR, "a-b.md"), (chr(0x202E), "a-b.md"), (chr(0x2067), "a-b.md")],
+)
+def test_the_hint_for_separators_and_bidi_names_suggests_a_corrected_valid_name(char: str, corrected: str) -> None:
+    error = failure(path_ref(f"a{char}{char}b.md"))
+
+    assert f"'{corrected}'" in error.hint
+    assert validate_page_ref(path_ref(corrected)) == corrected
+
+
+def test_a_name_made_only_of_separators_or_bidi_characters_gets_a_generic_hint() -> None:
+    error = failure(path_ref(f"{LINE_SEPARATOR}{chr(0x202E)}.md"))
+
+    assert error.code == "path.invalid_name"
+    assert "use '" not in error.hint and "visible" in error.hint
+
+
+def test_names_with_other_invisible_characters_stay_accepted() -> None:
+    # Only separators and text-direction controls are rejected; zero-width characters are not.
+    for char in (chr(0x200B), chr(0x00AD)):
+        assert validate_page_ref(path_ref(f"a{char}b.md")) == f"a{char}b.md"
 
 
 def test_unsafe_names_are_reported_before_the_markdown_suffix_rule() -> None:

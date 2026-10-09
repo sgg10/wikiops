@@ -73,6 +73,7 @@ Rules for `github_wiki`:
 - the provider works through a local clone: a relative `workdir` resolves against the working directory of the command, and the default is a per-profile directory in the user cache
 - ref paths are flat root pages that end in `.md` (for example `Home.md`); a path with `/` is rejected
 - `allow_auto_commit` defaults to `true` and `allow_auto_push` to `false`, so a run commits locally but does not publish
+- `generate_sidebar` defaults to `false`; set it to `true` only when the user wants a generated `_Sidebar.md` (it reserves that page name)
 - unknown settings keys are rejected
 - see [GitHub wiki provider reference](github-wiki-provider.md) before configuring or debugging it
 

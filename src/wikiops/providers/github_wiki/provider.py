@@ -44,7 +44,7 @@ from wikiops_sdk.domain import (
     PutAssetOperation,
 )
 
-from wikiops.providers.github_wiki import layout, rollback, writes
+from wikiops.providers.github_wiki import layout, rollback, sidebar_io, writes
 from wikiops.providers.github_wiki.errors import GithubWikiError, render_message
 from wikiops.providers.github_wiki.git import Git
 from wikiops.providers.github_wiki.lock import WorkdirLock
@@ -191,18 +191,22 @@ class GithubWikiProvider:
 
     # -- DocumentProvider: reads -------------------------------------------------------
 
+    def _checked_ref(self, ref: DocumentRef) -> None:
+        """Apply the page policy to a plan-time reference; the sidebar name is reserved when generated."""
+        layout.validate_page_ref(ref, reserve_sidebar=self.settings.generate_sidebar)
+
     def resolve_ref(
         self, ref: DocumentRef, ctx: Optional[ExecutionContext] = None
     ) -> DocumentRef:
-        layout.validate_page_ref(ref)
+        self._checked_ref(ref)
         return self._ready("plan").resolve_ref(ref, ctx)
 
     def exists(self, ref: DocumentRef) -> bool:
-        layout.validate_page_ref(ref)
+        self._checked_ref(ref)
         return self._ready("plan").exists(ref)
 
     def get_document(self, ref: DocumentRef) -> Document:
-        layout.validate_page_ref(ref)
+        self._checked_ref(ref)
         return self._ready("plan").get_document(ref)
 
     # -- DocumentProvider: links -------------------------------------------------------
@@ -288,7 +292,11 @@ class GithubWikiProvider:
         sync = self._wiki_sync()
         with sync.lock.hold("apply"):
             sync.recheck()
-            prepared = writes.prepare(operations, provider_name=self.settings.provider_name)
+            prepared = writes.prepare(
+                operations,
+                provider_name=self.settings.provider_name,
+                reserve_sidebar=self.settings.generate_sidebar,
+            )
             if not prepared.delegated:
                 return writes.in_order(operations, prepared.failures)
             before = rollback.take_snapshot(self._git_facade())
@@ -302,7 +310,41 @@ class GithubWikiProvider:
             results = writes.in_order(operations, prepared.failures, settled.results)
             if all(item.status is OperationStatus.FAILED for item in results):
                 return results  # a failed apply leaves the history as it was
-            return self._publish(sync, changeset.plugin_id, settled, results)
+            if not self.settings.generate_sidebar:
+                return self._publish(sync, changeset.plugin_id, settled, results)[0]
+            return self._write_with_sidebar(
+                backend, sync, changeset, prepared.delegated, settled, results
+            )
+
+    def _write_with_sidebar(
+        self,
+        backend: DocumentProvider,
+        sync: WikiSync,
+        changeset: ChangeSet,
+        delegated: tuple[Any, ...],
+        settled: writes.Settled,
+        results: list[AppliedOperationResult],
+    ) -> list[AppliedOperationResult]:
+        """Regenerate ``_Sidebar.md``, publish it with the pages and deliver its warnings (SB10-SB13).
+
+        The sidebar joins the written set (so it is staged and recorded by exact path in the
+        same commit) without counting as a page. A run that wrote or skipped no page leaves it
+        alone. Whatever happens to the sidebar is a warning on one result, never a failure of
+        a page operation.
+        """
+        sources = writes.hint_sources(delegated, settled.results)
+        if not sources:
+            return self._publish(sync, changeset.plugin_id, settled, results)[0]
+        writer = sidebar_io.SidebarWriter(self._git_facade(), backend, sync.manifest, changeset)
+        report = writer.regenerate(sources)
+        settled = writes.with_generated(settled, report.generated)
+        carrier = writes.first_carrier(results)  # the fallback when publishing fails them all (G2)
+        results, ignored = self._publish(sync, changeset.plugin_id, settled, results)
+        status = report.status_warning
+        if layout.SIDEBAR_PAGE in ignored and layout.SIDEBAR_PAGE in report.generated:
+            status = writer.restore_after_publish()  # an ignore rule appeared after the pre-check
+        warnings = (*report.hint_warnings, *([status] if status else []))
+        return writes.attach_warnings(results, warnings, fallback=carrier)
 
     def _accepted(
         self,
@@ -340,12 +382,17 @@ class GithubWikiProvider:
         plugin_id: str,
         settled: writes.Settled,
         results: list[AppliedOperationResult],
-    ) -> list[AppliedOperationResult]:
-        """Commit (and push) per the settings and put the outcome on the results."""
+    ) -> tuple[list[AppliedOperationResult], tuple[str, ...]]:
+        """Commit (and push) per the settings; the results with the outcome, and the ignored paths.
+
+        The ignored paths are the written ones an ignore rule hides from git (empty when nothing
+        is committed): operations that wrote them are failed here, and the caller needs the list
+        for the one path no operation reports, the generated sidebar.
+        """
         settings = self.settings
         if not settings.allow_auto_commit:
             note = f"written to '{self._resolved_workdir()}', not committed (allow_auto_commit=false)"
-            return writes.annotate(results, note=note)
+            return writes.annotate(results, note=note), ()
         state = sync.state
         assert state is not None  # _ready("apply") synced
         publisher = Publisher(
@@ -364,7 +411,7 @@ class GithubWikiProvider:
             unpushed=sync.unpushed_commits() if settings.allow_auto_push else 0,
         )
         results = writes.fail_ignored(results, outcome.ignored, workdir=outcome.workdir)
-        return writes.annotate(results, note=outcome.note, error=outcome.error)
+        return writes.annotate(results, note=outcome.note, error=outcome.error), outcome.ignored
 
     # -- host hook ---------------------------------------------------------------------
 
@@ -388,7 +435,10 @@ class GithubWikiProvider:
             f"auto_push={_flag(self.settings.allow_auto_push)}",
             f"sync_on_plan={_flag(self.settings.sync_on_plan)}",
             f"backend={self.settings.local_backend.type}",
+            f"sidebar={_flag(self.settings.generate_sidebar)}",
         ]
+        if self.settings.generate_sidebar:
+            parts.append(f"sidebar_action={sidebar_io.plan_action(workdir)}")
         if state is not None:
             parts.append(f"pending_paths={state.pending}")
             parts.append(f"unpushed_commits={state.unpushed}")

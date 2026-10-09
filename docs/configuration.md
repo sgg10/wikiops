@@ -138,6 +138,7 @@ profiles:
 - `auth` (optional, default `ambient`): `mode` is `env` (`variable`), `gh` (`account`), `ssh` (optional `key_path`), or `ambient`; a token is never written in the config
 - `commit` (optional): `identity` (`git`, `bot` or `custom`) and `message` template with `{plugin_id}`, `{provider_name}`, `{page_count}`
 - `allow_auto_commit` (optional, default `true`) and `allow_auto_push` (optional, default `false`; requires auto commit)
+- `generate_sidebar` (optional, default `false`): maintain a managed `_Sidebar.md` that links every root page; an existing sidebar without the managed marker is never overwritten (see [`reference/github-wiki.md`](reference/github-wiki.md#managed-sidebar))
 - `local_backend` (optional, default `{type: local_files}`): backend that writes the files into the clone
 - `git_timeout_seconds` (optional, default `120`)
 

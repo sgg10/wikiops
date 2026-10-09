@@ -38,6 +38,10 @@ def _e(hint: str) -> CodeSpec:
     return CodeSpec("E", hint)
 
 
+def _w(hint: str) -> CodeSpec:
+    return CodeSpec("W", hint)
+
+
 CODES: dict[str, CodeSpec] = {
     # -- configuration -----------------------------------------------------
     "config.invalid": _e("fix the setting named above; valid keys or variants are listed there"),
@@ -114,9 +118,7 @@ CODES: dict[str, CodeSpec] = {
     ),
     "sync.timeout": _e("raise git_timeout_seconds or check the network connection"),
     "sync.git_failed": _e("inspect the git output above and the state of the workdir"),
-    "sync.stale_plan": CodeSpec(
-        "W", "set sync_on_plan: true or run apply, which always syncs first"
-    ),
+    "sync.stale_plan": _w("set sync_on_plan: true or run apply, which always syncs first"),
     # -- workdir -----------------------------------------------------------
     "workdir.unusable": _e("choose another workdir path that is a writable directory"),
     "workdir.manifest_corrupt": _e(
@@ -155,6 +157,19 @@ CODES: dict[str, CodeSpec] = {
         "pull or rebase in the workdir manually, then push or re-run apply"
     ),
     "push.failed": _e("inspect the push output and the local commit in the workdir"),
+    # -- generated sidebar (warnings: they never fail a page operation) ----
+    "sidebar.unmanaged_exists": _w(
+        "add '<!-- wikiops:managed sidebar -->' as the first line to let wikiops manage it, "
+        "or set generate_sidebar: false"
+    ),
+    "sidebar.invalid_hint": _w(
+        "expected metadata.github_wiki.sidebar = "
+        "{group?: str<=80, order?: int in -1000000..1000000, label?: str<=80}"
+    ),
+    "sidebar.write_failed": _w(
+        "fix the cause above and re-run apply to regenerate _Sidebar.md; "
+        "page operations are not affected"
+    ),
 }
 
 

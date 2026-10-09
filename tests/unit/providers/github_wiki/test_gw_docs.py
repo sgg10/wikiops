@@ -50,12 +50,27 @@ def test_the_reference_code_table_lists_exactly_the_closed_vocabulary() -> None:
 
     assert documented  # the table was found and parsed
     assert documented == set(CODES)
+    assert len(documented) == 51
 
 
 def test_the_skill_reaction_tables_cover_exactly_the_closed_vocabulary() -> None:
     documented = table_codes(section(SKILL_REFERENCE.read_text(encoding="utf-8"), "## Reading a failure"))
 
     assert documented == set(CODES)
+    assert len(documented) == 51
+
+
+@pytest.mark.parametrize(
+    "code", ["sidebar.unmanaged_exists", "sidebar.invalid_hint", "sidebar.write_failed"]
+)
+def test_the_sidebar_warning_codes_are_documented_as_warnings_in_both_tables(code: str) -> None:
+    reference = section(REFERENCE.read_text(encoding="utf-8"), "## Error Codes")
+    skill = section(SKILL_REFERENCE.read_text(encoding="utf-8"), "## Reading a failure")
+
+    reference_row = next(line for line in reference.splitlines() if f"| `{code}` |" in line)
+    skill_row = next(line for line in skill.splitlines() if f"| `{code}` |" in line)
+
+    assert "Warning" in reference_row and "Warning" in skill_row
 
 
 @pytest.mark.parametrize("code", sorted(CODES))
@@ -69,7 +84,7 @@ def test_the_reference_states_the_behaviors_users_must_know() -> None:
     text = REFERENCE.read_text(encoding="utf-8")
 
     assert "hooks" in text and "disabled" in text  # network commands run with hooks disabled
-    assert "generate_sidebar" in text and "not available" in text  # sidebar is not supported yet
+    assert "| `generate_sidebar` | `false` |" in text  # the sidebar is an opt-in setting
     assert "create the first page in the web ui" in text.lower().replace("**", "")
     assert "allow_auto_commit` | `true`" in text and "allow_auto_push` | `false`" in text
     for mode in ("env", "gh", "ssh", "ambient"):
@@ -93,10 +108,75 @@ def test_the_documented_defaults_are_the_real_defaults() -> None:
     assert "| `git_timeout_seconds` | `120` |" in text
 
 
-def test_the_skill_never_offers_the_sidebar() -> None:
-    text = SKILL_REFERENCE.read_text(encoding="utf-8")
+MARKER = "<!-- wikiops:managed sidebar -->"
+SIDEBAR_CODES = ("sidebar.unmanaged_exists", "sidebar.invalid_hint", "sidebar.write_failed")
+STALE_SIDEBAR_CLAIMS = ("not available", "not supported yet", "later release", "never offers")
+COMMON_SIDEBAR_FACTS = (
+    "generate_sidebar",
+    MARKER,
+    "metadata.github_wiki.sidebar",
+    "child_metadata",
+    "`group`",
+    "`order`",
+    "`label`",
+    "80 characters",
+    "`null`",
+    "Home",
+    "path.reserved",
+    "plan time",
+    "web UI",
+    "asset-only",
+    "first `APPLIED` or `SKIPPED`",
+    *SIDEBAR_CODES,
+)
 
-    assert "generate_sidebar" in text and "not supported yet" in text
+
+def sidebar_text(path: Path, heading: str) -> str:
+    return section(path.read_text(encoding="utf-8"), heading)
+
+
+def test_the_reference_has_a_sidebar_section_with_the_contract_and_the_host_limits() -> None:
+    text = sidebar_text(REFERENCE, "## Managed Sidebar")
+
+    for fact in COMMON_SIDEBAR_FACTS:
+        assert fact in text, fact
+    for rule in ("same commit", "never overwritten", "1 MiB", "byte-identical", "-1000000..1000000"):
+        assert rule in text, rule
+
+
+def test_the_skill_has_a_sidebar_section_with_the_contract_and_the_host_limits() -> None:
+    text = sidebar_text(SKILL_REFERENCE, "## Managed sidebar")
+
+    for fact in COMMON_SIDEBAR_FACTS:
+        assert fact in text, fact
+
+
+@pytest.mark.parametrize("path", [REFERENCE, SKILL_REFERENCE], ids=["reference", "skill"])
+def test_no_document_still_says_the_sidebar_is_unavailable(path: Path) -> None:
+    lines = [line for line in path.read_text(encoding="utf-8").splitlines() if "sidebar" in line.lower()]
+
+    assert lines
+    for line in lines:
+        assert not any(claim in line.lower() for claim in STALE_SIDEBAR_CLAIMS), line
+
+
+def test_the_settings_lists_of_the_other_documents_name_generate_sidebar() -> None:
+    for path in (
+        ROOT / "docs" / "configuration.md",
+        SKILL / "references" / "configuration.md",
+        SKILL_REFERENCE,
+        REFERENCE,
+    ):
+        assert "`generate_sidebar`" in path.read_text(encoding="utf-8"), path
+
+
+def test_path_reserved_is_documented_with_the_sidebar_name_when_enabled() -> None:
+    reference = section(REFERENCE.read_text(encoding="utf-8"), "## Error Codes")
+    skill = section(SKILL_REFERENCE.read_text(encoding="utf-8"), "## Reading a failure")
+
+    for table in (reference, skill):
+        row = next(line for line in table.splitlines() if "| `path.reserved` |" in line)
+        assert ".git" in row and "_Sidebar.md" in row and "generate_sidebar" in row
 
 
 def test_the_example_config_loads_and_the_factory_validates_it_offline(tmp_path: Path) -> None:
@@ -111,6 +191,9 @@ def test_the_example_config_loads_and_the_factory_validates_it_offline(tmp_path:
     assert provider.settings.repository == "acme/platform"
     assert provider.settings.allow_auto_commit is True and provider.settings.allow_auto_push is False
     assert provider.settings.auth.mode == "env" and provider.settings.provider_name == "wiki"
+    assert provider.settings.generate_sidebar is False  # shown, commented, and off by default
+    assert "generate_sidebar: false" in EXAMPLE.read_text(encoding="utf-8")
+    assert dict(definition.settings)["generate_sidebar"] is False
     assert config.profiles["default"].refs["home"].locator == {"path": "Home.md"}
     assert runner.calls == []
 

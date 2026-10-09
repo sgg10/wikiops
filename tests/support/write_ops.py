@@ -41,20 +41,42 @@ def ref(path: str) -> DocumentRef:
     return DocumentRef(provider="", kind=RefKind.PATH, locator={"path": path})
 
 
-def create(path: str | None, content: str = "# page\n", *, title: str = "Title") -> CreateDocumentOperation:
-    return CreateDocumentOperation(ref=None if path is None else ref(path), title=title, content=content)
+def create(
+    path: str | None,
+    content: str = "# page\n",
+    *,
+    title: str = "Title",
+    metadata: dict[str, Any] | None = None,
+) -> CreateDocumentOperation:
+    return CreateDocumentOperation(
+        ref=None if path is None else ref(path), title=title, content=content, metadata=metadata or {}
+    )
 
 
-def update(path: str, content: str) -> UpdateDocumentOperation:
-    return UpdateDocumentOperation(ref=ref(path), new_content=content)
+def update(path: str, content: str, *, metadata: dict[str, Any] | None = None) -> UpdateDocumentOperation:
+    return UpdateDocumentOperation(ref=ref(path), new_content=content, metadata=metadata or {})
 
 
 def child(
-    title: str, content: str = "# child\n", *, path: str | None = None, parent: str = "Home.md"
+    title: str,
+    content: str = "# child\n",
+    *,
+    path: str | None = None,
+    parent: str = "Home.md",
+    metadata: dict[str, Any] | None = None,
 ) -> CreateChildDocumentOperation:
     return CreateChildDocumentOperation(
-        parent_ref=ref(parent), ref=None if path is None else ref(path), child_title=title, child_content=content
+        parent_ref=ref(parent),
+        ref=None if path is None else ref(path),
+        child_title=title,
+        child_content=content,
+        child_metadata=metadata or {},
     )
+
+
+def sidebar_hint(**keys: Any) -> dict[str, Any]:
+    """The metadata a plugin attaches to place a page: ``{"github_wiki": {"sidebar": keys}}``."""
+    return {"github_wiki": {"sidebar": keys}}
 
 
 def asset(name: str = "logo.png", key: str = "logo") -> PutAssetOperation:
