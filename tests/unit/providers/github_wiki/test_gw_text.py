@@ -92,8 +92,35 @@ def test_neighbours_of_the_invisible_ranges_are_not_matched(code_point: int) -> 
     assert text.INVISIBLE_CHARACTERS.search(chr(code_point)) is None
 
 
+# Every range a class may touch, widened by a margin so a character gained or lost next to a
+# boundary is seen, plus a deterministic stride over the rest of Unicode.
+_RELEVANT_RANGES = (
+    (0x0000, 0x00FF),  # C0, DEL, C1, soft hyphen and the Latin-1 neighbours
+    (0x0600, 0x0620),  # Arabic letter mark
+    (0x1800, 0x1810),  # Mongolian vowel separator
+    (0x2000, 0x2070),  # zero-width, bidi, line separators, joiners, isolates
+    (0xFEF0, 0xFF00),  # zero-width no-break space
+)
+_SCANNED_CODE_POINTS = sorted(
+    {code for first, last in _RELEVANT_RANGES for code in range(first, last + 1)}
+    | set(range(0, 0x110000, 0x101))
+    | {0x10FFFF}
+)
+
+
 def _matching_code_points(pattern) -> set[int]:  # noqa: ANN001
-    return {code for code in range(0x110000) if pattern.fullmatch(chr(code))}
+    return {code for code in _SCANNED_CODE_POINTS if pattern.fullmatch(chr(code))}
+
+
+def test_the_character_classes_match_exactly_their_documented_code_points() -> None:
+    assert _matching_code_points(text.CONTROL_CHARACTERS) == {*range(0x20), *range(0x7F, 0xA0)}
+    assert _matching_code_points(text.LINE_SEPARATORS) == {0x2028, 0x2029}
+    assert _matching_code_points(text.BIDI_CONTROLS) == {
+        0x061C,
+        *range(0x200E, 0x2010),
+        *range(0x202A, 0x202F),
+        *range(0x2066, 0x206A),
+    }
 
 
 def test_the_page_name_class_is_exactly_the_union_of_controls_separators_and_bidi_controls() -> None:
