@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import random
 import time
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -33,7 +34,6 @@ SUFFIX = " -->"
 SEED_RANGE = range(200)
 # JSON escape of a zero-width space (spelled without a literal escape in the source).
 ZW_ESCAPE = chr(92) + "u200b"
-LOOSE_SECONDS = 2.0
 
 
 def p(group: str | None = None, order: int | None = None, label: str | None = None) -> Placement:
@@ -158,50 +158,92 @@ def test_parse_oversized_text_with_lone_surrogates_does_not_raise():
 
 
 # -- linear time ---------------------------------------------------------------
+#
+# Cost is judged by how it SCALES, never by an absolute wall-clock bound: the same input
+# is parsed at 1/SCALE of its size and at full size, each timed as the best of REPEATS
+# runs after one warm-up, and the ratio of the two must stay far below the quadratic
+# ratio. For SCALE = 8 a linear parse costs about 8x more on the big input and a
+# quadratic one about 64x; the bound sits between them with a wide margin on each side,
+# so a slow or coverage-instrumented machine (which slows both runs alike) cannot flake
+# it, while a quadratic regression cannot hide.
 
 BIG = MAX_PARSE_BYTES - 1024
+SCALE = 8
+REPEATS = 5
+MAX_RATIO = 24.0  # linear is about 8, quadratic about 64
+TIMER_FLOOR = 1e-4  # seconds; keeps a near-zero small run from inflating the ratio
 
 
-def timed(text: str) -> tuple[dict[str, Placement], float]:
-    started = time.perf_counter()
+def best_seconds(function: Callable[[str], object], text: str) -> float:
+    """Return the fastest of REPEATS timed runs of ``function(text)`` after a warm-up."""
+    function(text)
+    timings = []
+    for _ in range(REPEATS):
+        started = time.perf_counter()
+        function(text)
+        timings.append(time.perf_counter() - started)
+    return min(timings)
+
+
+def cost_ratio(function: Callable[[str], object], build: Callable[[int], str]) -> float:
+    """Return time(full size) / time(1/SCALE size) for ``function`` over ``build(size)``."""
+    small = best_seconds(function, build(BIG // SCALE))
+    big = best_seconds(function, build(BIG))
+    return big / max(small, TIMER_FLOOR)
+
+
+def quadratic(text: str) -> int:
+    """A deliberately quadratic stand-in: one full scan per 8 KiB of input."""
+    return sum(text.count("a") for _ in range(0, len(text), 8192))
+
+
+def hostile(shape: Callable[[int], str]) -> Callable[[int], str]:
+    """Wrap a body builder so the text is a managed sidebar of roughly ``size`` bytes."""
+    return lambda size: MARKER + "\n" + shape(size)
+
+
+def test_cost_ratio_tells_linear_from_quadratic_cost():
+    build = lambda size: "a" * size  # noqa: E731
+    linear = cost_ratio(lambda text: text.count("a"), build)
+    assert cost_ratio(quadratic, build) > MAX_RATIO > linear
+
+
+SHAPES = [
+    pytest.param(lambda size: "- " + "a" * size, id="one-long-line-no-suffix"),
+    pytest.param(lambda size: "- " + PREFIX * (size // len(PREFIX)) + SUFFIX, id="repeated-prefix"),
+    pytest.param(lambda size: "- " + SUFFIX * (size // len(SUFFIX)) + SUFFIX, id="repeated-suffix"),
+    pytest.param(
+        lambda size: "- x" + PREFIX + '{"page":"' + "a" * size + '"}' + SUFFIX, id="huge-valid-page"
+    ),
+    pytest.param(lambda size: "- x" + PREFIX + "[" * size + "]" * 3 + SUFFIX, id="deep-nesting"),
+    pytest.param(lambda size: "- x\n" * (size // 4), id="many-lines"),
+    pytest.param(
+        lambda size: ("- " + PREFIX + "{" + SUFFIX + "\n") * (size // 40), id="many-bad-records"
+    ),
+]
+
+
+@pytest.mark.parametrize("shape", SHAPES)
+def test_parse_one_mebibyte_of_hostile_text_defaults_and_scales_linearly(shape):
+    text = hostile(shape)(BIG)
+
     parsed = parse(text)
-    return parsed, time.perf_counter() - started
 
-
-@pytest.mark.parametrize(
-    "body",
-    [
-        pytest.param("- " + "a" * BIG, id="one-long-line-no-suffix"),
-        pytest.param("- " + PREFIX * (BIG // len(PREFIX)) + SUFFIX, id="repeated-prefix"),
-        pytest.param("- " + SUFFIX * (BIG // len(SUFFIX)) + SUFFIX, id="repeated-suffix"),
-        pytest.param(
-            "- x" + PREFIX + '{"page":"' + "a" * BIG + '"}' + SUFFIX, id="huge-valid-page"
-        ),
-        pytest.param("- x" + PREFIX + "[" * BIG + "]" * 3 + SUFFIX, id="deep-nesting"),
-        pytest.param("- x\n" * (BIG // 4), id="many-lines"),
-        pytest.param(("- " + PREFIX + "{" + SUFFIX + "\n") * (BIG // 40), id="many-bad-records"),
-    ],
-)
-def test_parse_one_mebibyte_of_hostile_text_is_linear_and_defaults(body):
-    parsed, seconds = timed(MARKER + "\n" + body)
-
-    assert seconds < LOOSE_SECONDS
     assert parsed == {} or all(stem == "a" * BIG for stem in parsed)
+    assert cost_ratio(parse, hostile(shape)) < MAX_RATIO
 
 
-def test_parse_huge_page_name_is_a_valid_entry_and_still_fast():
+def test_parse_huge_page_name_is_a_valid_entry_and_scales_linearly():
     huge = "a" * BIG
-    parsed, seconds = timed(managed(line(record_for(page=huge))))
 
-    assert seconds < LOOSE_SECONDS
-    assert parsed == {huge: p()}
+    assert parse(managed(line(record_for(page=huge)))) == {huge: p()}
+    assert cost_ratio(parse, lambda size: managed(line(record_for(page="a" * size)))) < MAX_RATIO
 
 
-def test_parse_one_mebibyte_single_line_unmanaged_is_instant():
-    parsed, seconds = timed("x" * MAX_PARSE_BYTES)
-
-    assert seconds < LOOSE_SECONDS
-    assert parsed == {}
+def test_parse_one_mebibyte_single_line_unmanaged_is_not_parsed():
+    # Rejected after reading the first line only; its cost is below timer resolution,
+    # so only the outcome is asserted.
+    assert parse("x" * MAX_PARSE_BYTES) == {}
 
 
 # -- robustness: hand-edited and malformed entries ------------------------------
