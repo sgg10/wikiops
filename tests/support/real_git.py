@@ -179,6 +179,15 @@ class Remote:
         run_git("push", "-q", self.url, f"{branch}:{branch}", cwd=self._web)
         return self.rev(branch)
 
+    def delete(self, path: str, *, message: str = "delete on the web") -> str:
+        """Remove ``path`` on top of the remote default branch and push it."""
+        run_git("fetch", "-q", self.url, f"+refs/heads/{self.head}:refs/remotes/origin/{self.head}", cwd=self._web)
+        run_git("checkout", "-q", "-B", self.head, f"origin/{self.head}", cwd=self._web)
+        run_git("rm", "-q", "--", path, cwd=self._web)
+        run_git("commit", "-q", "-m", message, cwd=self._web)
+        run_git("push", "-q", self.url, f"{self.head}:{self.head}", cwd=self._web)
+        return self.rev()
+
     # -- what the remote holds ----------------------------------------------------------
 
     def branches(self) -> list[str]:
