@@ -29,8 +29,8 @@ from wikiops.providers.github_wiki.settings import (
 )
 from wikiops.providers.github_wiki.text import (
     BIDI_CONTROLS,
-    CONTROL_CHARACTERS,
     LINE_SEPARATORS,
+    PAGE_NAME_UNSAFE_CHARACTERS,
     has_control_characters,
 )
 
@@ -43,9 +43,7 @@ _RESERVED_SEGMENT = ".git"
 _SEPARATORS = re.compile(r"[/\\]")
 _WHITESPACE_RUN = re.compile(r"\s+")
 # What a corrected name drops: every character a flat page name may not contain.
-_UNSAFE_RUN = re.compile(
-    f"[{CONTROL_CHARACTERS.pattern[1:-1]}{LINE_SEPARATORS.pattern[1:-1]}{BIDI_CONTROLS.pattern[1:-1]}]+"
-)
+_UNSAFE_RUN = re.compile(f"{PAGE_NAME_UNSAFE_CHARACTERS.pattern}+")
 _TITLE_FORBIDDEN_CHARS = frozenset('/\\:*?"<>|')
 _RAW_CONTENT_URL = re.compile(
     r"https?://raw\.githubusercontent\.com(?:[:/?#]|$)", re.IGNORECASE

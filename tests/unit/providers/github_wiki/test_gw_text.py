@@ -90,3 +90,18 @@ def test_each_invisible_code_point_is_matched_and_escaped(code_point: int) -> No
 )
 def test_neighbours_of_the_invisible_ranges_are_not_matched(code_point: int) -> None:
     assert text.INVISIBLE_CHARACTERS.search(chr(code_point)) is None
+
+
+def _matching_code_points(pattern) -> set[int]:  # noqa: ANN001
+    return {code for code in range(0x110000) if pattern.fullmatch(chr(code))}
+
+
+def test_the_page_name_class_is_exactly_the_union_of_controls_separators_and_bidi_controls() -> None:
+    union = (
+        _matching_code_points(text.CONTROL_CHARACTERS)
+        | _matching_code_points(text.LINE_SEPARATORS)
+        | _matching_code_points(text.BIDI_CONTROLS)
+    )
+
+    assert _matching_code_points(text.PAGE_NAME_UNSAFE_CHARACTERS) == union
+    assert {0x0A, 0x7F, 0x85, 0x2028, 0x2029, 0x061C, 0x202E, 0x2069} <= union

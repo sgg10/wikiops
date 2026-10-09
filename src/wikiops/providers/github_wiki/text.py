@@ -39,10 +39,18 @@ def _character_class(*spans: tuple[int, int]) -> re.Pattern[str]:
 
 # Unicode line and paragraph separators (U+2028, U+2029): not C0/C1 controls, yet they end a
 # line for ``str.splitlines`` and many viewers.
-LINE_SEPARATORS = _character_class((0x2028, 0x2029))
+_LINE_SEPARATOR_SPANS = ((0x2028, 0x2029),)
 # Text-direction controls that reorder what surrounds them: Arabic letter mark, left/right
 # marks (U+200E-200F), embeddings and overrides (U+202A-202E) and isolates (U+2066-2069).
-BIDI_CONTROLS = _character_class((0x061C, 0x061C), (0x200E, 0x200F), (0x202A, 0x202E), (0x2066, 0x2069))
+_BIDI_SPANS = ((0x061C, 0x061C), (0x200E, 0x200F), (0x202A, 0x202E), (0x2066, 0x2069))
+# C0 controls, DEL and C1 controls: the spans behind CONTROL_CHARACTERS.
+_CONTROL_SPANS = ((0x00, 0x1F), (0x7F, 0x9F))
+
+LINE_SEPARATORS = _character_class(*_LINE_SEPARATOR_SPANS)
+BIDI_CONTROLS = _character_class(*_BIDI_SPANS)
+# Every character a flat page name may not contain, as ONE class composed from the spans above
+# (never by slicing the source text of the other patterns).
+PAGE_NAME_UNSAFE_CHARACTERS = _character_class(*_CONTROL_SPANS, *_LINE_SEPARATOR_SPANS, *_BIDI_SPANS)
 
 
 def has_control_characters(value: str) -> bool:
