@@ -40,6 +40,10 @@ _MARKDOWN_SUFFIX = ".md"
 _EXCLUDED_PREFIX = "_"
 _TEXT_SHAPE = f"a non-empty single-line string of at most {MAX_TEXT} characters"
 _ORDER_SHAPE = "an integer"
+# An unknown hint key is plugin-controlled, so it is bounded and escaped before it is
+# echoed into a problem (and from there into a warning message).
+_MAX_ECHO = 80
+_ELLIPSIS = "..."
 _HOME = "Home"
 _RECORD_PREFIX = " <!-- wikiops:entry "
 _RECORD_SUFFIX = " -->"
@@ -139,9 +143,35 @@ def _check_order(value: Any) -> HintProblem | None:
     return HintProblem("order", _ORDER_SHAPE)
 
 
+def _visible(char: str) -> str:
+    """Return ``char``, or its visible escape when it is a control, invisible or line break."""
+    if _LINE_BOUNDARY.fullmatch(char):
+        return char.encode("unicode_escape").decode("ascii")
+    return escape_unsafe_characters(char)
+
+
+def _echo(key: str) -> str:
+    """Return ``key`` as one bounded line of visible characters, safe to show in a message.
+
+    Characters are escaped one by one and the output stops before it would exceed
+    :data:`_MAX_ECHO`, so an escape sequence is never cut in half and the work stays
+    bounded however long the key is.
+    """
+    shown: list[str] = []
+    size = 0
+    for char in key:
+        piece = _visible(char)
+        if size + len(piece) > _MAX_ECHO:
+            return "".join(shown) + _ELLIPSIS
+        shown.append(piece)
+        size += len(piece)
+    return "".join(shown)
+
+
 def _first_unknown_key(mapping: Mapping[Any, Any], allowed: frozenset[str]) -> str | None:
+    """Return the first (sorted) key outside ``allowed``, bounded and escaped for echoing."""
     unknown = sorted(str(key) for key in mapping if key not in allowed)
-    return unknown[0] if unknown else None
+    return _echo(unknown[0]) if unknown else None
 
 
 def _validate_sidebar(sidebar: Any) -> HintPatch | HintProblem:

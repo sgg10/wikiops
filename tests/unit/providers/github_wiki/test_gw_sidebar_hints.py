@@ -139,6 +139,118 @@ def test_validate_hint_reports_the_first_unknown_key_in_sorted_order():
     assert outcome.field == "weight"
 
 
+# -- validate_hint: unknown keys are echoed bounded and escaped ---------------
+
+ECHO_LIMIT = 80
+
+
+def sidebar_key_field(key: Any) -> str:
+    return problem_of(hint({key: 1})).field
+
+
+def namespace_key_field(key: Any) -> str:
+    return problem_of({"github_wiki": {key: 1}}).field
+
+
+@pytest.mark.parametrize("length", [1, 40, ECHO_LIMIT])
+def test_unknown_key_up_to_the_limit_is_echoed_whole(length):
+    key = "k" * length
+
+    assert sidebar_key_field(key) == key
+    assert namespace_key_field(key) == f"github_wiki.{key}"
+
+
+@pytest.mark.parametrize("length", [ECHO_LIMIT + 1, 500, 100_000])
+def test_unknown_key_over_the_limit_is_truncated_with_an_ellipsis(length):
+    key = "k" * length
+
+    assert sidebar_key_field(key) == "k" * ECHO_LIMIT + "..."
+    assert namespace_key_field(key) == "github_wiki." + "k" * ECHO_LIMIT + "..."
+
+
+def test_unknown_key_truncation_does_not_change_which_key_is_reported_first():
+    shared = "k" * 200
+
+    outcome = problem_of(hint({shared + "b": 1, shared + "a": 1}))
+
+    assert outcome.field == "k" * ECHO_LIMIT + "..."
+    assert outcome.expected == "only group, order and label are allowed"
+
+
+@pytest.mark.parametrize(
+    ("key", "echoed"),
+    [
+        ("a\nb", "a\\nb"),
+        ("a\rb", "a\\rb"),
+        ("a\r\nb", "a\\r\\nb"),
+        ("a\x0bb", "a\\x0bb"),
+        ("a\x0cb", "a\\x0cb"),
+        ("a\x1cb", "a\\x1cb"),
+        ("a\x1db", "a\\x1db"),
+        ("a\x1eb", "a\\x1eb"),
+        ("a\x85b", "a\\x85b"),
+        ("a\u2028b", "a\\u2028b"),
+        ("a\u2029b", "a\\u2029b"),
+        ("a\x00b", "a\\x00b"),
+        ("a\x1bb", "a\\x1bb"),
+        ("a\x7fb", "a\\x7fb"),
+        ("a\u202eb", "a\\u202eb"),
+        ("a\u200bb", "a\\u200bb"),
+    ],
+)
+def test_unknown_key_control_and_line_break_characters_are_escaped(key, echoed):
+    assert sidebar_key_field(key) == echoed
+    assert namespace_key_field(key) == f"github_wiki.{echoed}"
+
+
+def test_unknown_key_echo_is_one_line_of_visible_characters():
+    hostile = "x\n\r\u2028\u2029\x1b[31m\u202e" * 20
+
+    field = sidebar_key_field(hostile)
+
+    assert len(field.splitlines()) == 1
+    assert field.isprintable()
+    assert field.startswith("x\\n\\r\\u2028\\u2029\\x1b[31m\\u202e")
+
+
+def test_unknown_key_echo_is_bounded_even_when_every_character_expands():
+    field = sidebar_key_field("\u202e" * 10_000)
+
+    assert len(field) <= ECHO_LIMIT + len("...")
+    assert field.endswith("...")
+    assert field.count("\\u202e") == ECHO_LIMIT // len("\\u202e")
+
+
+def test_unknown_key_truncation_never_splits_an_escape_sequence():
+    field = sidebar_key_field("\u202e" * 100)
+
+    assert field == "\\u202e" * (ECHO_LIMIT // 6) + "..."
+
+
+@pytest.mark.parametrize("key", [3, 1.5, ("a", 1), None])
+def test_unknown_non_string_key_is_echoed_through_str(key):
+    assert sidebar_key_field(key) == str(key)
+
+
+def test_unknown_key_with_a_hostile_repr_is_still_one_bounded_line():
+    class Hostile:
+        def __str__(self) -> str:
+            return "line one\nline two " + "z" * 1_000
+
+    field = sidebar_key_field(Hostile())
+
+    assert "\n" not in field
+    assert len(field) <= ECHO_LIMIT + len("...")
+    assert field.startswith("line one\\nline two ")
+
+
+def test_known_field_names_are_never_altered_by_the_echo_rules():
+    assert problem_of(hint({"group": "x\ny"})).field == "group"
+    assert problem_of(hint({"order": "ten"})).field == "order"
+    assert problem_of(hint("text")).field == "sidebar"
+    assert problem_of({"github_wiki": "text"}).field == "github_wiki"
+
+
 # -- validate_hint: group and label -------------------------------------------
 
 
@@ -171,11 +283,14 @@ def test_validate_hint_text_counts_code_points_not_bytes(field):
         "a\nb",
         "a\rb",
         "a\r\nb",
-        "a b",
-        "a b",
+        "a\u2028b",
+        "a\u2029b",
         "a\x0bb",
         "a\x0cb",
         "a\x85b",
+        "a\x1cb",
+        "a\x1db",
+        "a\x1eb",
         "trailing\n",
     ],
 )
@@ -186,7 +301,22 @@ def test_validate_hint_text_rejects_every_line_boundary(field, value):
 
 
 @pytest.mark.parametrize("field", ["group", "label"])
-@pytest.mark.parametrize("value", ["", " ", "   ", "\t", " "])
+def test_validate_hint_text_boundary_set_is_exactly_what_splitlines_splits_on(field):
+    # Guards the hand-written boundary class against drifting from ``str.splitlines``:
+    # a character is rejected inside a text exactly when it breaks a line.
+    wrong = []
+    for code in range(0x10000):
+        text = f"a{chr(code)}b"
+        rejected = isinstance(validate_hint(hint({field: text})), HintProblem)
+        if rejected != (len(text.splitlines()) > 1):
+            wrong.append(hex(code))
+
+    assert wrong == []
+    assert len("a\x1cb".splitlines()) == 2
+
+
+@pytest.mark.parametrize("field", ["group", "label"])
+@pytest.mark.parametrize("value", ["", " ", "   ", "\t", "\u00a0"])
 def test_validate_hint_text_rejects_empty_and_whitespace_only(field, value):
     assert problem_of(hint({field: value})).field == field
 
