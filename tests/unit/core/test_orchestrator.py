@@ -22,6 +22,7 @@ from wikiops_sdk.domain import (
     PutAssetOperation,
     ProviderCapability,
     UpdateDocumentOperation,
+    WarningMessage,
 )
 
 
@@ -130,6 +131,31 @@ class GenericRecordingPlugin(RecordingPlugin):
 
     def required_ref_aliases(self, plugin_config, input_data):
         return {"inventory"}
+
+
+class MetadataPlugin(RecordingPlugin):
+    metadata = {
+        "source": {"repository": "acme/docs", "revision": "abc123"},
+        "labels": ["generated", "reviewed"],
+    }
+
+    def plan(self, ctx):
+        self.received_ctx = ctx
+        return ChangeSet(
+            plugin_id=self.manifest.plugin_id,
+            metadata=self.metadata,
+            warnings=[
+                WarningMessage(code="plugin_warning", message="review generated content")
+            ],
+            notes=[NoteMessage(code="plugin_note", message="metadata attached by plugin")],
+            operations=[
+                UpdateDocumentOperation(
+                    operation_id="metadata-update",
+                    ref=ctx.refs["inventory"],
+                    new_content="# Planned\n",
+                )
+            ],
+        )
 
 
 class CapabilityHungryPlugin(RecordingPlugin):
@@ -429,6 +455,37 @@ def test_plan_internal_builds_context_and_uses_plugin_config_fallbacks(
     assert plugin.received_ctx == ctx
     assert change_set.plugin_id == "demo.plugin"
     assert len(change_set.operations) == 1
+
+
+def test_plan_internal_preserves_change_set_metadata_and_existing_content(
+    monkeypatch: pytest.MonkeyPatch,
+    doc_ref_factory,
+    document_factory,
+) -> None:
+    plugin = MetadataPlugin()
+
+    _, _, change_set = _plan_with_plugin(
+        monkeypatch,
+        doc_ref_factory,
+        document_factory,
+        plugin,
+        {"title": "Example"},
+    )
+
+    assert getattr(change_set, "metadata", None) == plugin.metadata
+    assert change_set.warnings == [
+        WarningMessage(code="plugin_warning", message="review generated content")
+    ]
+    assert change_set.notes == [
+        NoteMessage(code="plugin_note", message="metadata attached by plugin")
+    ]
+    assert change_set.operations == [
+        UpdateDocumentOperation(
+            operation_id="metadata-update",
+            ref=doc_ref_factory(provider="default", path="/resolved"),
+            new_content="# Planned\n",
+        )
+    ]
 
 
 def test_plan_internal_preserves_omitted_optional_fields_in_input_data(
